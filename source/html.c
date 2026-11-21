@@ -7,7 +7,7 @@
 #include <string.h>
 #include <strings.h>
 
-const char *html_find(const char *s, const char *end, const char *needle)
+constchar *html_find(const char *s, const char *end, const char *needle)
 {
     size_t n = strlen(needle);
     if (!s || !end || n == 0) return NULL;
