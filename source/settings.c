@@ -36,6 +36,9 @@ static const char *TL_KEYS[]   = { "fr", "en", "es", "de", "it", "pt" };
 static const char *TL_NAMES[]  = { "Français", "English", "Español", "Deutsch", "Italiano", "Português" };
 static const char *VQ_KEYS[]   = { "auto", "220", "270", "360" };
 static const char *VM_KEYS[]   = { "direct", "preload" };
+static const char *IQ_KEYS[]   = { "normal", "high", "max" };
+static const char *CB_KEYS[]   = { "4", "8", "12", "20", "all" };
+static const int   CB_VALUES[] = { 4, 8, 12, 20, 0 };
 
 static char *trim(char *s)
 {
@@ -109,6 +112,8 @@ void settings_load(void)
         if (!strcmp(k, "client_id")) snprintf(g_cfg.client_id, sizeof(g_cfg.client_id), "%s", v);
         else if (!strcmp(k, "video_quality")) g_cfg.video_q = find_key(v, VQ_KEYS, VIDEO_QUALITIES, VQ_AUTO);
         else if (!strcmp(k, "video_mode")) g_cfg.video_mode = find_key(v, VM_KEYS, VIDEO_MODES, VM_DIRECT);
+        else if (!strcmp(k, "image_quality")) g_cfg.img_quality = find_key(v, IQ_KEYS, IMG_QUALITIES, IQ_NORMAL);
+        else if (!strcmp(k, "comments_per_page")) g_cfg.com_batch = find_key(v, CB_KEYS, COM_BATCHES, 0);
         else if (!strcmp(k, "translate_to")) g_cfg.tr_lang = find_key(v, TL_KEYS, TL_LANGS, g_cfg.tr_lang);
         else if (!strcmp(k, "recent")) snprintf(g_cfg.recent, sizeof(g_cfg.recent), "%s", v);
         else if (!strcmp(k, "redlib") && *v) snprintf(g_cfg.redlib, sizeof(g_cfg.redlib), "%s", v);
@@ -160,6 +165,10 @@ bool settings_save(void)
             "video_quality=%s\n"
             "# Lecture vidéo : direct (en flux), preload (démarre quand la vidéo est entièrement chargée)\n"
             "video_mode=%s\n"
+            "# Qualité des images : normal, high, max (décodage plus précis, aperçus plus grands, un peu plus lent)\n"
+            "image_quality=%s\n"
+            "# Commentaires affichés à la fois : 4, 8, 12, 20, all\n"
+            "comments_per_page=%s\n"
             "\n"
             "# Source des données : auto (Redlib puis archive), redlib, archive\n"
             "source=%s\n"
@@ -171,7 +180,7 @@ bool settings_save(void)
             "client_id=%s\n",
             LANG_KEYS[g_cfg.ui_lang], CL_KEYS[g_cfg.content_lang], g_cfg.start_sub,
             SORT_KEYS[g_cfg.default_sort], NSFW_KEYS[g_cfg.nsfw], IMG_KEYS[g_cfg.images],
-            TEXT_KEYS[g_cfg.text_size], TL_KEYS[g_cfg.tr_lang], VQ_KEYS[g_cfg.video_q], VM_KEYS[g_cfg.video_mode], SRC_KEYS[g_cfg.source], g_cfg.redlib, g_cfg.recent, g_cfg.client_id);
+            TEXT_KEYS[g_cfg.text_size], TL_KEYS[g_cfg.tr_lang], VQ_KEYS[g_cfg.video_q], VM_KEYS[g_cfg.video_mode], IQ_KEYS[g_cfg.img_quality], CB_KEYS[g_cfg.com_batch], SRC_KEYS[g_cfg.source], g_cfg.redlib, g_cfg.recent, g_cfg.client_id);
     fclose(f);
     return true;
 }
@@ -235,6 +244,11 @@ const char *settings_tr_code(int tl)
 const char *settings_tr_name(int tl)
 {
     return TL_NAMES[tl];
+}
+
+int settings_comment_batch(void)
+{
+    return CB_VALUES[g_cfg.com_batch >= 0 && g_cfg.com_batch < COM_BATCHES ? g_cfg.com_batch : 0];
 }
 
 int settings_video_maxp(void)

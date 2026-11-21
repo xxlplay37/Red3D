@@ -102,6 +102,7 @@ static Doc   g_body, g_com;
 static float g_body_img_y = -1, g_body_scroll, g_body_to;
 static float g_com_scroll, g_com_to, g_com_vel;
 static int   g_com_sel;
+static int   g_com_shown; /* commentaires affichés (chargement progressif) */
 static int  *g_com_depth;
 
 /* Image */
@@ -126,8 +127,8 @@ static char   g_recent[10][64];
 static int    g_nrecent;
 
 /* Paramètres */
-enum { SET_UI_LANG, SET_CONTENT, SET_SORT, SET_START, SET_NSFW, SET_IMAGES, SET_TEXT, SET_TRANSLATE,
-       SET_VIDEO, SET_VMODE, SET_SOURCE, SET_CLEAR, SET_COUNT };
+enum { SET_UI_LANG, SET_CONTENT, SET_SORT, SET_START, SET_NSFW, SET_IMAGES, SET_IMGQ, SET_TEXT, SET_TRANSLATE,
+       SET_VIDEO, SET_VMODE, SET_COMBATCH, SET_SOURCE, SET_CLEAR, SET_COUNT };
 #define SET_ROW_H 36.0f
 static int    g_set_sel;
 static float  g_set_scroll, g_set_to;
@@ -531,7 +532,8 @@ static void build_comments(bool keep)
         return;
     }
     float head = ui_line_height(0.4f) + 6;
-    for (int i = 0; i < g_comments.n; i++) {
+    int nshow = (g_com_shown > 0 && g_com_shown < g_comments.n) ? g_com_shown : g_comments.n;
+    for (int i = 0; i < nshow; i++) {
         const Comment *c = &g_comments.items[i];
         int d = c->depth > 6 ? 6 : c->depth;
         float cx = 6 + d * 7;
@@ -552,10 +554,37 @@ static void build_comments(bool keep)
         doc_item_end(&g_com);
         doc_space(&g_com, 4);
     }
+    if (nshow < g_comments.n) { /* la suite se charge en arrivant en bas */
+        char msg[96];
+        snprintf(msg, sizeof(msg), TR("%d autres commentaires · continue à défiler", "%d more comments · keep scrolling"),
+                 g_comments.n - nshow);
+        doc_text(&g_com, msg, 0.4f, 14, BOT_W - 28, COL_DIM, 0);
+        doc_space(&g_com, 12);
+    }
     if (keep) {
         if (g_com_sel >= g_com.nitems) g_com_sel = g_com.nitems ? g_com.nitems - 1 : 0;
         clamp_scroll(&g_com_to, g_com.h, TOOL_Y);
     }
+}
+
+/* Chargement progressif des commentaires */
+static int com_batch_size(void)
+{
+    int b = settings_comment_batch();
+    return b > 0 ? b : (1 << 30);
+}
+
+static bool com_has_more(void)
+{
+    return g_com_shown > 0 && g_com_shown < g_comments.n;
+}
+
+static void com_show_more(void)
+{
+    if (!com_has_more()) return;
+    long n = (long)g_com_shown + com_batch_size();
+    g_com_shown = n > g_comments.n ? g_comments.n : (int)n;
+    build_comments(true);
 }
 
 /* ------------------------------------------------------------------ */
@@ -780,10 +809,12 @@ static const char *set_label(int i)
     case SET_START:   return TR("Au démarrage", "On startup");
     case SET_NSFW:    return TR("Contenu NSFW", "NSFW content");
     case SET_IMAGES:  return TR("Images", "Images");
+    case SET_IMGQ:    return TR("Qualité des images", "Image quality");
     case SET_TEXT:    return TR("Taille du texte", "Text size");
     case SET_TRANSLATE: return TR("Traduire vers", "Translate to");
     case SET_VIDEO: return TR("Qualité vidéo max", "Max video quality");
     case SET_VMODE: return TR("Lecture vidéo", "Video playback");
+    case SET_COMBATCH: return TR("Commentaires par lot", "Comments per batch");
     case SET_SOURCE:  return TR("Source des données", "Data source");
     case SET_CLEAR:   return TR("Vider le cache d'images", "Clear image cache");
     }
@@ -810,6 +841,15 @@ static void set_value(int i, char *o, size_t n)
         snprintf(o, n, "%s", v[g_cfg.images]);
         break;
     }
+    case SET_IMGQ: {
+        const char *v[] = { TR("Normale", "Normal"), TR("Haute", "High"), TR("Très haute", "Very high") };
+        snprintf(o, n, "%s", v[g_cfg.img_quality]);
+        break;
+    }
+    case SET_COMBATCH:
+        if (settings_comment_batch() > 0) snprintf(o, n, "%d", settings_comment_batch());
+        else snprintf(o, n, "%s", TR("Tous", "All"));
+        break;
     case SET_TEXT: {
         const char *v[] = { TR("Petit", "Small"), TR("Normal", "Normal"), TR("Grand", "Large") };
         snprintf(o, n, "%s", v[g_cfg.text_size]);
@@ -865,6 +905,18 @@ static const char *set_help(int i)
                   "aperçus fournis par Reddit. Aucune : rien n'est téléchargé, sauf en plein écran.",
                   "All: thumbnails everywhere (more data). Light: only the small previews provided "
                   "by Reddit. None: nothing is downloaded except in full screen.");
+    case SET_IMGQ:
+        return TR("Normale : rapide. Haute : décodage JPEG plus précis (couleurs plus nettes, moins de blocs) "
+                  "et aperçus plus grands. Très haute : aperçus encore plus grands (plus de mémoire). "
+                  "Un peu plus lent à charger ; le cache d'images est vidé quand tu changes ce réglage.",
+                  "Normal: fast. High: more accurate JPEG decoding (sharper colours, fewer blocks) and "
+                  "larger previews. Very high: even larger previews (more memory). Slightly slower to "
+                  "load; the image cache is cleared when you change this setting.");
+    case SET_COMBATCH:
+        return TR("Nombre de commentaires affichés à la fois. La suite se charge automatiquement quand tu "
+                  "arrives en bas de la liste. Moins = affichage et traduction plus rapides.",
+                  "Number of comments shown at a time. More load automatically when you reach the bottom "
+                  "of the list. Fewer = faster display and translation.");
     case SET_TEXT:
         return TR("Taille des textes dans toute l'application.", "Size of text throughout the app.");
     case SET_TRANSLATE:
@@ -927,6 +979,20 @@ static void set_change(int i, int d)
         break;
     case SET_IMAGES:
         g_cfg.images = cycle(g_cfg.images, d, IMAGES_MODES);
+        break;
+    case SET_IMGQ:
+        g_cfg.img_quality = cycle(g_cfg.img_quality, d, IMG_QUALITIES);
+        if (g_online) {
+            img_set_quality(g_cfg.img_quality);
+            img_drop_all(); /* les images en cache gardent l'ancienne qualité */
+        }
+        break;
+    case SET_COMBATCH:
+        g_cfg.com_batch = cycle(g_cfg.com_batch, d, COM_BATCHES);
+        if (g_comments.n) {
+            g_com_shown = com_batch_size();
+            build_comments(true);
+        }
         break;
     case SET_TEXT:
         g_cfg.text_size = cycle(g_cfg.text_size, d, TEXT_SIZES);
@@ -1028,7 +1094,8 @@ static void toggle_translation(void)
     }
 
     clear_translation();
-    int n = 2 + g_comments.n;
+    int nc = (g_com_shown > 0 && g_com_shown < g_comments.n) ? g_com_shown : g_comments.n;
+    int n = 2 + nc;
     Job j;
     memset(&j, 0, sizeof(j));
     j.type = JOB_TRANSLATE;
@@ -1047,7 +1114,7 @@ static void toggle_translation(void)
     j.ntexts = n;
     j.texts[0] = strdup(p->title);
     j.texts[1] = strdup(p->selftext);
-    for (int i = 0; i < g_comments.n; i++)
+    for (int i = 0; i < nc; i++)
         j.texts[2 + i] = strdup(g_comments.items[i].more ? "" : g_comments.items[i].body);
     g_tr_n = n;
     g_tr_got = 0;
@@ -1270,6 +1337,7 @@ static void handle_job(Job *j)
         if (j->rc == 0) {
             g_comments = j->comments;
             memset(&j->comments, 0, sizeof(j->comments));
+            g_com_shown = com_batch_size();
             g_com_err[0] = '\0';
         } else {
             snprintf(g_com_err, sizeof(g_com_err), "%s", j->err);
@@ -2095,6 +2163,11 @@ static void input_post(u32 down, u32 rep, u32 held, const circlePosition *cp)
         g_com_vel *= 0.92f;
     }
     clamp_scroll(&g_com_to, g_com.h, TOOL_Y);
+    /* chargement progressif : arrivé en bas de la liste, on affiche le lot suivant */
+    if (com_has_more() && !loading(JOB_COMMENTS, -1)) {
+        float maxs = g_com.h - TOOL_Y;
+        if (maxs <= 0 || g_com_to >= maxs - 48) com_show_more();
+    }
     if (ui_touch_held() || fabsf(g_com_vel) > 0.3f) {
         for (int i = 0; i < g_com.nitems; i++) /* la sélection suit le défilement */
             if (g_com.items[i].bot > g_com_to + 4) { g_com_sel = i; break; }
@@ -2210,6 +2283,7 @@ int main(void)
     } else {
         job_init();
         img_init();
+        img_set_quality(g_cfg.img_quality);
         g_online = true;
         request_feed(false);
     }

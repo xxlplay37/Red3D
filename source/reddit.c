@@ -700,11 +700,20 @@ static int redlib_comments_from(const char *host, const Post *post, Comments *ou
 
     const char *p = html_find(html, end, "<div class=\"thread\"");
     int depth = 0;
+    /* Positions des prochains jetons, mises en cache : on ne cherche à nouveau que lorsqu'on a
+     * dépassé la position mémorisée (avant : 4 recherches jusqu'à la fin de la page à chaque tour). */
+    const char *c = NULL, *r = NULL, *x = NULL, *m = NULL;
+    if (p) {
+        c = html_find(p, end, T_COMMENT);
+        r = html_find(p, end, T_REPLIES);
+        x = html_find(p, end, T_CLOSE);
+        m = html_find(p, end, T_MORE);
+    }
     while (p && out->n < MAX_COMMENTS) {
-        const char *c = html_find(p, end, T_COMMENT);
-        const char *r = html_find(p, end, T_REPLIES);
-        const char *x = html_find(p, end, T_CLOSE);
-        const char *m = html_find(p, end, T_MORE);
+        if (c && c < p) c = html_find(p, end, T_COMMENT);
+        if (r && r < p) r = html_find(p, end, T_REPLIES);
+        if (x && x < p) x = html_find(p, end, T_CLOSE);
+        if (m && m < p) m = html_find(p, end, T_MORE);
         const char *first = NULL;
         const char *cand[4] = { c, r, x, m };
         for (int i = 0; i < 4; i++)

@@ -18,6 +18,9 @@ typedef enum {
 typedef enum { IMGS_LOADING = 0, IMGS_READY = 1, IMGS_FAILED = -1 } ImgState;
 
 void img_init(void);
+/* Qualité (0 normale, 1 haute, 2 très haute) : décodage JPEG plus précis et aperçus plus grands.
+ * Les images déjà en cache gardent l'ancienne qualité : appeler img_drop_all() ensuite. */
+void img_set_quality(int q);
 void img_exit(void);
 
 /* À appeler une fois par frame, juste après C3D_FrameBegin. */

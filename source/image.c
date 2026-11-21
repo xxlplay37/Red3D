@@ -43,6 +43,22 @@ static const int MAXW[IMG_KINDS]  = { 128, 400, 1024 };
 static const int MAXH[IMG_KINDS]  = { 128, 240, 1024 };
 static const size_t MAXDL[IMG_KINDS] = { 12u << 20, 12u << 20, 12u << 20 };
 
+static volatile int s_quality; /* 0 normale, 1 haute, 2 très haute */
+
+/* Taille max du décodage : l'aperçu grandit avec la qualité (512x256 = même texture GPU que 400x240) */
+static int max_w(ImgKind k) { return (k == IMG_PREVIEW && s_quality >= 1) ? 512 : MAXW[k]; }
+static int max_h(ImgKind k)
+{
+    if (k == IMG_PREVIEW && s_quality >= 2) return 512;
+    if (k == IMG_PREVIEW && s_quality >= 1) return 256;
+    return MAXH[k];
+}
+
+void img_set_quality(int q)
+{
+    s_quality = q < 0 ? 0 : (q > 2 ? 2 : q);
+}
+
 static Entry *s_entries[IMG_KINDS];
 static LightLock s_lock;
 static volatile bool s_quit;
@@ -192,8 +208,13 @@ static bool decode_jpeg(const u8 *data, size_t len, int maxw, int maxh, Scaler *
     cinfo.scale_num = 1;
     cinfo.scale_denom = denom;
     cinfo.out_color_space = JCS_RGB;
-    cinfo.dct_method = JDCT_IFAST;
-    cinfo.do_fancy_upsampling = FALSE;
+    if (s_quality >= 1) { /* plus précis (couleurs lissées, moins de blocs), un peu plus lent */
+        cinfo.dct_method = JDCT_ISLOW;
+        cinfo.do_fancy_upsampling = TRUE;
+    } else {
+        cinfo.dct_method = JDCT_IFAST;
+        cinfo.do_fancy_upsampling = FALSE;
+    }
 
     jpeg_start_decompress(&cinfo);
     if (!scaler_init(s, cinfo.output_width, cinfo.output_height, maxw, maxh)) longjmp(jerr.jmp, 1);
@@ -348,9 +369,9 @@ static void worker(void *arg)
                              &b, &code, err, sizeof(err)) == 0 && code == 200 && b.len > 8) {
                 const u8 *d = (const u8 *)b.data;
                 if (d[0] == 0xFF && d[1] == 0xD8)
-                    ok = decode_jpeg(d, b.len, MAXW[kind], MAXH[kind], &sc, &w->abort);
+                    ok = decode_jpeg(d, b.len, max_w(kind), max_h(kind), &sc, &w->abort);
                 else if (!memcmp(d, "\x89PNG", 4))
-                    ok = decode_png(d, b.len, MAXW[kind], MAXH[kind], &sc, &w->abort);
+                    ok = decode_png(d, b.len, max_w(kind), max_h(kind), &sc, &w->abort);
             }
             buf_free(&b);
 

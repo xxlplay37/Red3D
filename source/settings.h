@@ -11,7 +11,9 @@ enum { TEXT_SMALL, TEXT_NORMAL, TEXT_LARGE, TEXT_SIZES };
 enum { SRC_AUTO, SRC_REDLIB, SRC_ARCHIVE, SRC_MODES };
 enum { TL_FR, TL_EN, TL_ES, TL_DE, TL_IT, TL_PT, TL_LANGS };
 enum { VQ_AUTO, VQ_220, VQ_270, VQ_360, VIDEO_QUALITIES };
-enum { VM_DIRECT, VM_PRELOAD, VIDEO_MODES };   /* lecture en flux / après chargement complet */
+enum { VM_DIRECT, VM_PRELOAD, VIDEO_MODES };
+enum { IQ_NORMAL, IQ_HIGH, IQ_MAX, IMG_QUALITIES };   /* qualité des images */
+#define COM_BATCHES 5                                  /* 4, 8, 12, 20, tous */   /* lecture en flux / après chargement complet */
 
 typedef struct {
     int ui_lang;
@@ -23,6 +25,8 @@ typedef struct {
     int source;
     int tr_lang;        /* langue cible de la traduction */
     int video_q;        /* qualité vidéo maximale */
+    int img_quality;    /* IQ_* : décodage JPEG plus précis + aperçus plus grands */
+    int com_batch;      /* commentaires affichés à la fois (index : 4, 8, 12, 20, tous) */
     int video_mode;     /* VM_DIRECT : en flux, VM_PRELOAD : démarre une fois tout chargé */
     char start_sub[64]; /* "" = fil d'accueil */
     char recent[700];   /* subreddits récents, séparés par des virgules */
@@ -49,6 +53,8 @@ const char *settings_tr_code(int tl);
 const char *settings_tr_name(int tl);
 /* Qualité vidéo maximale en pixels (plus petit côté), selon le réglage et le modèle */
 int settings_video_maxp(void);
+/* Nombre de commentaires affichés à la fois (0 = tous) */
+int settings_comment_batch(void);
 
 /* Traduction : TR("français", "english") */
 #define TR(fr, en) (g_cfg.ui_lang == LANG_EN ? (en) : (fr))
