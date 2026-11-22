@@ -1,4 +1,4 @@
-# Reddit3DS
+# Red3D
 
 A read-only Reddit client for the Nintendo 3DS (homebrew, CFW required), distributed as a `.cia`
 (or `.3dsx`). No account or `client_id` required.
