@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "emoji_data.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -43,10 +44,114 @@ static float glyph_adv_raw(u32 cp)
     return w ? (float)w->charWidth : 0.0f;
 }
 
+/* ------------------------------------------------------------------ */
+/* Emoji : images pré-rendues (romfs:/emoji.bin), affichées dans le texte */
+
+static C3D_Tex s_emoji_tex;
+static bool s_emoji_ok, s_emoji_failed;
+
+static int emoji_index(u32 cp)
+{
+    int lo = 0, hi = EMOJI_COUNT - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (EMOJI_CP[mid] == cp) return mid;
+        if (EMOJI_CP[mid] < cp) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return -1;
+}
+
+/* Caractères invisibles qui accompagnent les emoji : sélecteurs, jonction, teintes de peau, étiquettes */
+static bool emoji_ignored(u32 cp)
+{
+    return cp == 0xFE0F || cp == 0xFE0E || cp == 0x200D || cp == 0x20E3 ||
+           (cp >= 0x1F3FB && cp <= 0x1F3FF) || (cp >= 0xE0020 && cp <= 0xE007F);
+}
+
+static bool is_regional(u32 cp)
+{
+    return cp >= 0x1F1E6 && cp <= 0x1F1FF; /* drapeaux : affichés en lettres (FR, US...) */
+}
+
+/* Faut-il un traitement particulier pour ce caractère ? */
+static bool cp_special(u32 cp)
+{
+    if (cp < 0x200D) return false;
+    return emoji_ignored(cp) || is_regional(cp) || emoji_index(cp) >= 0;
+}
+
+static bool text_has_special(const char *s)
+{
+    for (const char *p = s; *p;) {
+        if ((unsigned char)*p >= 0xE2) {
+            u32 cp;
+            int n = utf8_next(p, &cp);
+            if (cp_special(cp)) return true;
+            p += n;
+        } else {
+            p++;
+        }
+    }
+    return false;
+}
+
+static float emoji_adv(void)
+{
+    return s_line_feed * 0.92f;
+}
+
 static float glyph_adv(u32 cp)
 {
     if (cp < 128) return s_ascii_adv[cp];
+    if (cp >= 0x200D) {
+        if (emoji_ignored(cp)) return 0.0f;
+        if (is_regional(cp)) return s_ascii_adv['A' + (cp - 0x1F1E6)];
+        if (emoji_index(cp) >= 0) return emoji_adv();
+    }
     return glyph_adv_raw(cp);
+}
+
+static void emoji_load(void)
+{
+    if (s_emoji_ok || s_emoji_failed) return;
+    s_emoji_failed = true;
+    FILE *f = fopen("romfs:/emoji.bin", "rb");
+    if (!f) return;
+    size_t size = (size_t)EMOJI_TW * EMOJI_TH * 4;
+    if (C3D_TexInit(&s_emoji_tex, EMOJI_TW, EMOJI_TH, GPU_RGBA8)) {
+        if (fread(s_emoji_tex.data, 1, size, f) == size) {
+            C3D_TexFlush(&s_emoji_tex);
+            C3D_TexSetFilter(&s_emoji_tex, GPU_LINEAR, GPU_LINEAR);
+            C3D_TexSetWrap(&s_emoji_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+            s_emoji_ok = true;
+            s_emoji_failed = false;
+        } else {
+            C3D_TexDelete(&s_emoji_tex);
+        }
+    }
+    fclose(f);
+}
+
+/* Dessine l'emoji idx dans la ligne de texte dont le coin haut-gauche est (x, y) */
+static void emoji_draw(int idx, float x, float y, float scale)
+{
+    emoji_load();
+    if (!s_emoji_ok) return; /* pas de texture : on laisse un espace */
+    const float lh = s_line_feed * scale;
+    const float g = emoji_adv() * scale;                          /* taille visible du dessin */
+    const float d = g * (float)EMOJI_CELL / (EMOJI_CELL - 2);     /* case entière (marge de 1 px) */
+    int col = idx % EMOJI_COLS, row = idx / EMOJI_COLS;
+    Tex3DS_SubTexture st;
+    st.width = EMOJI_CELL;
+    st.height = EMOJI_CELL;
+    st.left = (float)(col * EMOJI_CELL) / EMOJI_TW;
+    st.right = (float)((col + 1) * EMOJI_CELL) / EMOJI_TW;
+    st.top = 1.0f - (float)(row * EMOJI_CELL) / EMOJI_TH;
+    st.bottom = 1.0f - (float)((row + 1) * EMOJI_CELL) / EMOJI_TH;
+    C2D_Image img = { &s_emoji_tex, &st };
+    float k = d / EMOJI_CELL;
+    C2D_DrawImageAt(img, x - (d - g) / 2, y + (lh - d) / 2 + lh * 0.04f, 0.5f, NULL, k, k);
 }
 
 void ui_init(void)
@@ -62,6 +167,7 @@ void ui_init(void)
 void ui_exit(void)
 {
     C2D_TextBufDelete(s_buf);
+    if (s_emoji_ok) C3D_TexDelete(&s_emoji_tex);
 }
 
 u32 g_ui_frame;
@@ -89,14 +195,53 @@ float ui_text_width(const char *s, float scale)
     return w * scale;
 }
 
+static void draw_run(const char *run, float x, float y, float scale, u32 color)
+{
+    C2D_Text t;
+    C2D_TextParse(&t, s_buf, run);
+    C2D_TextOptimize(&t);
+    C2D_DrawText(&t, C2D_WithColor, x, y, 0.5f, scale, scale, color);
+}
+
 void ui_text(float x, float y, float scale, u32 color, const char *s)
 {
     if (!s || !*s) return;
     scale *= s_mul;
-    C2D_Text t;
-    C2D_TextParse(&t, s_buf, s);
-    C2D_TextOptimize(&t);
-    C2D_DrawText(&t, C2D_WithColor, x, y, 0.5f, scale, scale, color);
+    if (!text_has_special(s)) {
+        draw_run(s, x, y, scale, color);
+        return;
+    }
+    /* Texte avec emoji : on dessine les morceaux de texte et les images l'un après l'autre */
+    char run[200];
+    size_t rn = 0;
+    float rw = 0, cx = x;
+    for (const char *p = s; *p;) {
+        u32 cp;
+        int n = utf8_next(p, &cp);
+        const char *src = p;
+        p += n;
+        if (emoji_ignored(cp)) continue;
+        int ei = (cp >= 0x200D && !is_regional(cp)) ? emoji_index(cp) : -1;
+        if (ei >= 0) {
+            if (rn) { run[rn] = '\0'; draw_run(run, cx, y, scale, color); cx += rw; rn = 0; rw = 0; }
+            emoji_draw(ei, cx, y, scale);
+            cx += emoji_adv() * scale;
+            continue;
+        }
+        char one[1];
+        if (is_regional(cp)) { one[0] = (char)('A' + (cp - 0x1F1E6)); src = one; n = 1; }
+        if (rn + (size_t)n >= sizeof(run) - 1) {
+            run[rn] = '\0';
+            draw_run(run, cx, y, scale, color);
+            cx += rw;
+            rn = 0;
+            rw = 0;
+        }
+        memcpy(run + rn, src, (size_t)n);
+        rn += (size_t)n;
+        rw += glyph_adv(cp) * scale;
+    }
+    if (rn) { run[rn] = '\0'; draw_run(run, cx, y, scale, color); }
 }
 
 void ui_bar(float x, float y, float w, float h, const char *left, const char *right)

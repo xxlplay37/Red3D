@@ -238,7 +238,8 @@ static int src_read(void *opaque, uint8_t *out, int want)
 }
 
 /* file != NULL : télécharge tout dans ce fichier (préchargement) au lieu du tampon circulaire */
-static bool src_start(Source *s, const char *url, size_t cap, int core, const char *file)
+/* adopt : connexion déjà ouverte (TLS établi) à reprendre au lieu d'en créer une nouvelle */
+static bool src_start(Source *s, const char *url, size_t cap, int core, const char *file, NetConn *adopt)
 {
     snprintf(s->url, sizeof(s->url), "%s", url);
     LightLock_Init(&s->lock);
@@ -250,7 +251,7 @@ static bool src_start(Source *s, const char *url, size_t cap, int core, const ch
     } else {
         s->buf = malloc(cap);
     }
-    s->conn = net_conn_new(&s_stop);
+    s->conn = adopt ? adopt : net_conn_new(&s_stop);
     if ((!file && !s->buf) || (file && !s->wf) || !s->conn) return false;
     s32 prio = 0x30;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
@@ -588,12 +589,17 @@ static void video_thread(void *arg)
     if (!choose_streams(vurl, aurl, sizeof(vurl))) goto fail;
     vlog("playlist ok : qualite %dp, son %s, duree %.1f s", s_quality, aurl[0] ? "oui" : "non", s_duration);
 
-    if (!src_start(&s_vsrc, vurl, VBUF_CAP, -2, pre ? "sdmc:/3ds/reddit3ds/pre_v.mp4" : NULL)) {
+    /* La connexion qui a servi à lire la playlist (même hôte v.redd.it) sert au flux vidéo :
+     * pas de nouvelle poignée de main TLS ni de nouveau chargement des certificats. */
+    NetConn *mc = s_mconn;
+    s_mconn = NULL;
+    bool vok = src_start(&s_vsrc, vurl, VBUF_CAP, -2, pre ? "sdmc:/3ds/reddit3ds/pre_v.mp4" : NULL, mc);
+    if (!vok) {
         snprintf(s_error, sizeof(s_error), pre ? "Carte SD inaccessible (fichier temporaire)" : "Mémoire insuffisante");
         goto fail;
     }
     if (aurl[0] && s_ndsp_ok)
-        a_started = src_start(&s_asrc, aurl, ABUF_CAP, -2, pre ? "sdmc:/3ds/reddit3ds/pre_a.mp4" : NULL);
+        a_started = src_start(&s_asrc, aurl, ABUF_CAP, -2, pre ? "sdmc:/3ds/reddit3ds/pre_a.mp4" : NULL, NULL);
 
     if (pre) {
         /* Préchargement : on attend la fin des téléchargements avant de lire quoi que ce soit */

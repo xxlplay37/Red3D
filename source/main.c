@@ -103,6 +103,8 @@ static float g_body_img_y = -1, g_body_scroll, g_body_to;
 static float g_com_scroll, g_com_to, g_com_vel;
 static int   g_com_sel;
 static int   g_com_shown; /* commentaires affichés (chargement progressif) */
+static int   g_vid_tab;   /* écran vidéo, bas : 0 contrôles, 1 commentaires */
+#define VTAB_H 24.0f      /* hauteur de la barre d'onglets (écran vidéo) */
 static int  *g_com_depth;
 
 /* Image */
@@ -511,6 +513,12 @@ static void build_body(bool keep)
     if (keep) clamp_scroll(&g_body_to, g_body.h, SCR_H - HEAD_H);
 }
 
+/* Hauteur visible de la liste de commentaires (l'écran vidéo a une barre d'onglets au-dessus) */
+static float com_view_h(void)
+{
+    return g_screen == SCR_VIDEO ? TOOL_Y - VTAB_H : TOOL_Y;
+}
+
 static void build_comments(bool keep)
 {
     doc_free(&g_com);
@@ -563,7 +571,7 @@ static void build_comments(bool keep)
     }
     if (keep) {
         if (g_com_sel >= g_com.nitems) g_com_sel = g_com.nitems ? g_com.nitems - 1 : 0;
-        clamp_scroll(&g_com_to, g_com.h, TOOL_Y);
+        clamp_scroll(&g_com_to, g_com.h, com_view_h());
     }
 }
 
@@ -1154,6 +1162,7 @@ static void open_video(void)
     if (!p || !p->video_id[0]) return;
     g_video_back = g_screen;
     g_screen = SCR_VIDEO;
+    g_vid_tab = 0;
     if (!video_open(p->video_id, settings_video_maxp(), g_cfg.video_mode == VM_PRELOAD))
         ui_toast(video_error());
 }
@@ -1331,7 +1340,7 @@ static void handle_job(Job *j)
         }
         break;
     case JOB_COMMENTS:
-        if (g_screen != SCR_POST && g_screen != SCR_IMAGE) break;
+        if (g_screen != SCR_POST && g_screen != SCR_IMAGE && g_screen != SCR_VIDEO) break;
         if (strcmp(j->post_id, g_post_id)) break;
         comments_clear(&g_comments);
         if (j->rc == 0) {
@@ -1664,22 +1673,20 @@ static void draw_post_top(void)
     ui_draw_toast(TOP_W);
 }
 
-static void draw_post_bottom(void)
+/* Liste des commentaires dans la zone (0, vy) - (BOT_W, vy + vh) de l'écran du bas */
+static void draw_comment_list(float vy, float vh)
 {
-    C2D_TargetClear(g_bot, COL_BG);
-    C2D_SceneBegin(g_bot);
-
     if (loading(JOB_COMMENTS, -1) && g_comments.n == 0) {
-        ui_spinner(BOT_W / 2, 90, 14, COL_ACCENT);
-        ui_text_center(BOT_W / 2, 114, 0.45f, COL_DIM,
+        ui_spinner(BOT_W / 2, vy + 90, 14, COL_ACCENT);
+        ui_text_center(BOT_W / 2, vy + 114, 0.45f, COL_DIM,
                        TR("Chargement des commentaires...", "Loading comments..."));
     }
 
     for (int i = 0; i < g_com.nitems && i < g_comments.n; i++) {
-        float top = g_com.items[i].top - g_com_scroll;
-        float bot = g_com.items[i].bot - g_com_scroll;
-        if (bot < 0) continue;
-        if (top > TOOL_Y) break;
+        float top = g_com.items[i].top - g_com_scroll + vy;
+        float bot = g_com.items[i].bot - g_com_scroll + vy;
+        if (bot < vy) continue;
+        if (top > vy + vh) break;
         const Comment *c = &g_comments.items[i];
         int d = g_com_depth ? g_com_depth[i] : 0;
         float cx = 6 + d * 7;
@@ -1700,8 +1707,16 @@ static void draw_post_bottom(void)
             ui_text(sx, top + 5, 0.4f, COL_DIM, score);
         }
     }
-    doc_draw(&g_com, 0, 0, BOT_W, TOOL_Y, g_com_scroll, -1);
-    draw_scrollbar(BOT_W - 4, 2, TOOL_Y - 4, g_com.h, g_com_scroll);
+    doc_draw(&g_com, 0, vy, BOT_W, vh, g_com_scroll, -1);
+    draw_scrollbar(BOT_W - 4, vy + 2, vh - 4, g_com.h, g_com_scroll);
+}
+
+static void draw_post_bottom(void)
+{
+    C2D_TargetClear(g_bot, COL_BG);
+    C2D_SceneBegin(g_bot);
+
+    draw_comment_list(0, TOOL_Y);
 
     draw_toolbar_bg();
     const Post *p = cur_post();
@@ -1950,12 +1965,10 @@ static void draw_video_top(void)
     ui_draw_toast(TOP_W);
 }
 
-static void draw_video_bottom(void)
+static void draw_video_panel(void)
 {
-    C2D_TargetClear(g_bot, COL_BG);
-    C2D_SceneBegin(g_bot);
     const Post *p = cur_post();
-    float y = 8;
+    float y = 8 + VTAB_H;
     if (p) {
         Doc d;
         memset(&d, 0, sizeof(d));
@@ -2021,6 +2034,35 @@ static void draw_video_bottom(void)
         ui_text(bx, y + 18, 0.38f, COL_DIM, TR(BTN_DPAD " haut/bas ou " BTN_L BTN_R " : volume",
                                                BTN_DPAD " up/down or " BTN_L BTN_R ": volume"));
     }
+
+}
+
+/* Onglets du bas : contrôles / commentaires (se dessinent après la liste pour cacher son débordement) */
+static void draw_video_tabs(void)
+{
+    C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, VTAB_H, COL_BAR);
+    C2D_DrawRectSolid(0, VTAB_H - 1, 0.5f, BOT_W, 1, COL_LINE);
+    const char *lab[2] = { TR("Contrôles", "Controls"), TR("Commentaires", "Comments") };
+    for (int i = 0; i < 2; i++) {
+        char buf[48];
+        bool on = (i == g_vid_tab);
+        float x0 = i * (BOT_W / 2.0f);
+        if (i == 1 && g_comments.n > 0) snprintf(buf, sizeof(buf), "%s (%d)", lab[i], g_comments.n);
+        else snprintf(buf, sizeof(buf), "%s", lab[i]);
+        if (on) C2D_DrawRectSolid(x0 + 12, VTAB_H - 3, 0.5f, BOT_W / 2.0f - 24, 3, COL_ACCENT);
+        ui_text_center(x0 + BOT_W / 4.0f, (VTAB_H - 3 - ui_line_height(0.45f)) / 2, 0.45f, on ? COL_WHITE : COL_DIM, buf);
+    }
+}
+
+static void draw_video_bottom(void)
+{
+    C2D_TargetClear(g_bot, COL_BG);
+    C2D_SceneBegin(g_bot);
+    if (g_vid_tab == 1) draw_comment_list(VTAB_H, com_view_h());
+    else draw_video_panel();
+    draw_video_tabs();
+    if (g_vid_tab == 0)
+        ui_text(16, TOOL_Y - 20, 0.38f, COL_DIM, TR(BTN_Y " : voir les commentaires", BTN_Y ": show comments"));
 
     draw_toolbar_bg();
     const float tby = TOOL_Y + 5, bh = 26;
@@ -2136,12 +2178,39 @@ static void input_feed(u32 down, u32 rep)
         request_feed(true);
 }
 
+/* Défilement des commentaires (croix directionnelle, doigt avec inertie, chargement des lots suivants)
+ * dans la zone (0, vy) - (BOT_W, vy + vh). */
+static void input_comments(u32 rep, float vy, float vh)
+{
+    if (rep & KEY_DOWN) doc_step(&g_com, +1, vh, &g_com_sel, &g_com_to);
+    if (rep & KEY_UP) doc_step(&g_com, -1, vh, &g_com_sel, &g_com_to);
+    if (rep & KEY_RIGHT) for (int i = 0; i < 4; i++) doc_step(&g_com, +1, vh, &g_com_sel, &g_com_to);
+    if (rep & KEY_LEFT) for (int i = 0; i < 4; i++) doc_step(&g_com, -1, vh, &g_com_sel, &g_com_to);
+
+    /* glisser du doigt sur les commentaires, avec inertie */
+    if (ui_touch_held() && ui_touch_y() >= vy && ui_touch_y() < vy + vh) {
+        float d = ui_touch_dy();
+        g_com_to -= d;
+        g_com_vel = -d;
+        g_com_scroll = g_com_to;
+    } else if (fabsf(g_com_vel) > 0.3f) {
+        g_com_to += g_com_vel;
+        g_com_vel *= 0.92f;
+    }
+    clamp_scroll(&g_com_to, g_com.h, vh);
+    /* chargement progressif : arrivé en bas de la liste, on affiche le lot suivant */
+    if (com_has_more() && !loading(JOB_COMMENTS, -1)) {
+        float maxs = g_com.h - vh;
+        if (maxs <= 0 || g_com_to >= maxs - 48) com_show_more();
+    }
+    if (ui_touch_held() || fabsf(g_com_vel) > 0.3f) {
+        for (int i = 0; i < g_com.nitems; i++) /* la sélection suit le défilement */
+            if (g_com.items[i].bot > g_com_to + 4) { g_com_sel = i; break; }
+    }
+}
+
 static void input_post(u32 down, u32 rep, u32 held, const circlePosition *cp)
 {
-    if (rep & KEY_DOWN) doc_step(&g_com, +1, TOOL_Y, &g_com_sel, &g_com_to);
-    if (rep & KEY_UP) doc_step(&g_com, -1, TOOL_Y, &g_com_sel, &g_com_to);
-    if (rep & KEY_RIGHT) for (int i = 0; i < 4; i++) doc_step(&g_com, +1, TOOL_Y, &g_com_sel, &g_com_to);
-    if (rep & KEY_LEFT) for (int i = 0; i < 4; i++) doc_step(&g_com, -1, TOOL_Y, &g_com_sel, &g_com_to);
 
     float dy = 0;
     if (abs(cp->dy) > 20) dy -= cp->dy / 10.0f;
@@ -2152,26 +2221,7 @@ static void input_post(u32 down, u32 rep, u32 held, const circlePosition *cp)
         clamp_scroll(&g_body_to, g_body.h, SCR_H - HEAD_H);
     }
 
-    /* glisser du doigt sur les commentaires, avec inertie */
-    if (ui_touch_held() && ui_touch_y() < TOOL_Y) {
-        float d = ui_touch_dy();
-        g_com_to -= d;
-        g_com_vel = -d;
-        g_com_scroll = g_com_to;
-    } else if (fabsf(g_com_vel) > 0.3f) {
-        g_com_to += g_com_vel;
-        g_com_vel *= 0.92f;
-    }
-    clamp_scroll(&g_com_to, g_com.h, TOOL_Y);
-    /* chargement progressif : arrivé en bas de la liste, on affiche le lot suivant */
-    if (com_has_more() && !loading(JOB_COMMENTS, -1)) {
-        float maxs = g_com.h - TOOL_Y;
-        if (maxs <= 0 || g_com_to >= maxs - 48) com_show_more();
-    }
-    if (ui_touch_held() || fabsf(g_com_vel) > 0.3f) {
-        for (int i = 0; i < g_com.nitems; i++) /* la sélection suit le défilement */
-            if (g_com.items[i].bot > g_com_to + 4) { g_com_sel = i; break; }
-    }
+    input_comments(rep, 0, TOOL_Y);
 
     if (down & KEY_A) g_act = ACT_VIEW;
     if (down & KEY_B) g_act = ACT_BACK;
@@ -2232,9 +2282,19 @@ static void input_video(u32 down, u32 rep)
 {
     if (down & KEY_A) g_act = ACT_VIDEO_PLAY;
     if (down & KEY_B) g_act = ACT_BACK;
-    if (rep & (KEY_UP | KEY_R | KEY_ZR)) g_act = ACT_VOL_UP;
-    if (rep & (KEY_DOWN | KEY_L | KEY_ZL)) g_act = ACT_VOL_DOWN;
-    if (ui_touch_tap() && ui_touch_y() < TOOL_Y) g_act = ACT_VIDEO_PLAY;
+    if (down & KEY_Y) g_vid_tab = !g_vid_tab; /* contrôles <-> commentaires */
+    if (rep & (KEY_R | KEY_ZR)) g_act = ACT_VOL_UP;
+    if (rep & (KEY_L | KEY_ZL)) g_act = ACT_VOL_DOWN;
+    if (g_vid_tab == 0) {
+        if (rep & KEY_UP) g_act = ACT_VOL_UP;
+        if (rep & KEY_DOWN) g_act = ACT_VOL_DOWN;
+    } else {
+        input_comments(rep, VTAB_H, com_view_h());
+    }
+    if (ui_touch_tap() && ui_touch_y() < TOOL_Y) {
+        if (ui_touch_y() < VTAB_H) g_vid_tab = ui_touch_x() < BOT_W / 2.0f ? 0 : 1;
+        else if (g_vid_tab == 0) g_act = ACT_VIDEO_PLAY;
+    }
 }
 
 static void input_settings(u32 down, u32 rep)

@@ -3,7 +3,8 @@
 #include <stddef.h>
 
 #define NET_USER_AGENT "3ds:reddit3ds:v2.0 (homebrew Nintendo 3DS client)"
-#define NET_CA_PATH    "romfs:/cacert.pem"
+#define NET_CA_PATH    "romfs:/cacert.pem"        /* bundle complet (~118 autorités) */
+#define NET_CA_SMALL   "romfs:/cacert_small.pem"  /* jeu réduit : TLS démarre bien plus vite ; repli sur le complet */
 
 #define ACCEPT_JSON  "application/json"
 #define ACCEPT_HTML  "text/html,application/xhtml+xml"
