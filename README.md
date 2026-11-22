@@ -139,3 +139,16 @@ have this issue).
 
 If the app crashes, the **last line** of the log file indicates the stage it reached (playlist,
 FFmpeg track opening, thread creation, audio, first frame, etc.).
+
+
+
+
+## Source used
+
+FourthTube : https://github.com/erievs/FourthTube
+
+Logo: https://www.flaticon.com/free-icon/reddit_2504934
+
+Logo convertion :DavidLaurent007(https://github.com/DavidLaurent007)
+
+Creating the .gitignore file : KaliLugu
