@@ -1,138 +1,141 @@
 # Reddit3DS
 
-Client Reddit en lecture seule pour Nintendo 3DS (homebrew, CFW requis), distribué en `.cia`
-(ou `.3dsx`). Aucun compte ni client_id nécessaire.
+A read-only Reddit client for the Nintendo 3DS (homebrew, CFW required), distributed as a `.cia`
+(or `.3dsx`). No account or `client_id` required.
 
-- Interface moderne : cartes arrondies, miniatures, défilement fluide, animations de chargement,
-  notifications, barre d'actions tactile
-- **Images** : miniatures dans le fil, aperçu sur l'écran du bas, image dans le post et
-  **visionneuse plein écran zoomable** (JPEG et PNG ; aperçu pour les vidéos et galeries)
-- **Recherche de subreddits** avec icônes, nombre de membres et description
-- **Vidéos Reddit avec le son** (v.redd.it), jusqu'à 360p, lecture en flux ou après préchargement complet, pause, volume, pourcentage de chargement
-- **Traduction** des posts et commentaires en un bouton (affichage au fur et à mesure)
-- Commentaires en arborescence colorée, défilement au doigt avec inertie
-- Tris : Populaires / Nouveaux / Top (24 h) / En hausse, défilement infini
-- Chargements en arrière-plan (l'interface ne se fige jamais, B annule)
-- HTTPS vérifié (libcurl + mbedTLS + certificats Mozilla dans le RomFS)
+- Modern interface: rounded cards, thumbnails, smooth scrolling, loading animations,
+  notifications, and a touch action bar
+- **Images**: thumbnails in the feed, preview on the bottom screen, images in posts, and a
+  **zoomable full-screen viewer** (JPEG and PNG; previews for videos and galleries)
+- **Subreddit search** with icons, member counts, and descriptions
+- **Reddit videos with sound** (`v.redd.it`), up to 360p, streamed or played after full preloading,
+  with pause, volume control, and loading progress
+- **One-tap translation** of posts and comments (displayed progressively)
+- Color-coded threaded comments, with inertial touch scrolling
+- Sorting: Popular / New / Top (24 h) / Rising, with infinite scrolling
+- Background loading (the interface never freezes; B cancels the operation)
+- Verified HTTPS (libcurl + mbedTLS + Mozilla certificates in RomFS)
 
-## Commandes
+## Controls
 
-| Écran      | Bouton                 | Action                                        |
-|------------|------------------------|-----------------------------------------------|
-| Fil        | Croix (←/→ : ×4)       | Choisir un post                               |
-| Fil        | A / toucher l'aperçu   | Ouvrir le post                                |
-| Fil        | Y / bouton Subs        | Onglet Subs : barre de recherche + clavier tactile |
-| Fil        | L / R                  | Changer le tri                                |
-| Fil        | X                      | Actualiser                                    |
-| Post       | Croix / glisser le doigt | Parcourir les commentaires                  |
-| Post       | Stick, L / R           | Faire défiler le texte du post               |
-| Post       | A                      | Image en plein écran                          |
-| Post       | A (post vidéo)         | Lire la vidéo avec le son                     |
-| Vidéo      | A / toucher, B         | Pause / lecture, retour                       |
-| Vidéo      | Croix haut/bas, L / R  | Volume                                        |
-| Post       | Y / bouton Traduire    | Traduire le post et les commentaires (appuyer à nouveau : original) |
-| Image      | L / R, boutons + −     | Zoom                                          |
-| Image      | Stick, croix, glisser  | Se déplacer dans l'image                     |
-| Subs       | Clavier tactile        | Taper (recherche automatique), récents et suggestions quand la barre est vide |
-| Subs       | X / Y                  | Effacer une lettre / lancer la recherche     |
-| Subs       | Croix, A               | Choisir et ouvrir un subreddit                |
-| Partout    | SELECT / bouton Réglages | Paramètres                                  |
-| Partout    | B                      | Retour / annuler le chargement                |
-| Partout    | START                  | Quitter                                       |
+| Screen | Button | Action |
+|---|---|---|
+| Feed | D-pad (←/→: ×4) | Select a post |
+| Feed | A / tap the preview | Open the post |
+| Feed | Y / Subs button | Open the Subs tab: search bar + touch keyboard |
+| Feed | L / R | Change sorting |
+| Feed | X | Refresh |
+| Post | D-pad / swipe | Browse comments |
+| Post | Circle Pad, L / R | Scroll through the post text |
+| Post | A | Open image full-screen |
+| Post | A (video post) | Play the video with sound |
+| Video | A / tap, B | Pause / play, exit |
+| Video | D-pad up/down, L / R | Adjust volume |
+| Post | Y / Translate button | Translate the post and comments (press again to show the original) |
+| Image | L / R, + / − buttons | Zoom |
+| Image | Circle Pad, D-pad, swipe | Move around the image |
+| Subs | Touch keyboard | Type (automatic search); recent searches and suggestions appear when the search bar is empty |
+| Subs | X / Y | Delete a character / start the search |
+| Subs | D-pad, A | Select and open a subreddit |
+| Anywhere | SELECT / Settings button | Open settings |
+| Anywhere | B | Go back / cancel loading |
+| Anywhere | START | Exit |
 
-## Compilation
+## Building
 
-**Le plus simple : double-cliquer sur `COMPILER.bat`** (Windows + WSL).
-Sous Linux/WSL : `./build.sh`.
+**The easiest option is to double-click `COMPILER.bat`** (Windows + WSL).
+On Linux/WSL, run `./build.sh`.
 
-Le script n'installe rien sur le système (pas de sudo, pas de Docker) : il télécharge
-devkitARM depuis l'image Docker officielle `devkitpro/devkitarm` et `makerom` depuis
-GitHub dans `~/.cache/reddit3ds`, puis produit `Reddit3DS.cia` et `Reddit3DS.3dsx` ici.
-Le premier lancement prend quelques minutes, les suivants quelques secondes.
+The script does not install anything system-wide (no `sudo`, no Docker): it downloads
+devkitARM from the official `devkitpro/devkitarm` Docker image and `makerom` from
+GitHub into `~/.cache/reddit3ds`, then generates `Reddit3DS.cia` and `Reddit3DS.3dsx` here.
+The first run takes a few minutes; subsequent runs take only a few seconds.
 
-Le premier lancement compile aussi une version minimale de **FFmpeg** (H.264, AAC, MP4 ;
-licence LGPL) via `tools/build_ffmpeg.sh`, mise en cache dans `~/.cache/reddit3ds/ffmpeg`.
+The first run also builds a minimal version of **FFmpeg** (H.264, AAC, MP4;
+LGPL license) using `tools/build_ffmpeg.sh`. It is cached in `~/.cache/reddit3ds/ffmpeg`.
 
-La bannière (`assets/banner.bnr`) est pré-générée et l'icône est convertie par `smdhtool`
-(fourni avec devkitPro) : bannertool n'est pas nécessaire.
+The banner (`assets/banner.bnr`) is pre-generated, and the icon is converted with
+`smdhtool` (included with devkitPro): `bannertool` is not required.
 
-Avec un devkitPro déjà installé : `make cia` (makerom dans le `PATH`).
+If devkitPro is already installed, run `make cia` (`makerom` must be in your `PATH`).
 
 ## Installation
 
-1. Copier `Reddit3DS.cia` sur la carte SD.
-2. L'installer avec **FBI** (ou Universal-Updater / GodMode9).
-3. Le lancer depuis le menu HOME (Wi-Fi activé).
+1. Copy `Reddit3DS.cia` to your SD card.
+2. Install it using **FBI** (or Universal-Updater / GodMode9).
+3. Launch it from the HOME Menu (with Wi-Fi enabled).
 
-Version `.3dsx` : la copier dans `sdmc:/3ds/` et la lancer depuis le Homebrew Launcher.
+For the `.3dsx` version, copy it to `sdmc:/3ds/` and launch it from the Homebrew Launcher.
 
-## Sources des données (aucun compte ni client_id requis)
+## Data sources (no account or `client_id` required)
 
-Reddit bloque désormais l'accès anonyme direct et ne délivre plus facilement de `client_id`.
-L'appli passe donc par :
+Reddit now blocks direct anonymous access and no longer makes it easy to obtain a `client_id`.
+The app therefore uses:
 
-1. **Redlib** : interface Reddit libre hébergée par des bénévoles. Données en direct, tris
-   Populaires / Nouveaux / Top / En hausse. Plusieurs instances sont essayées l'une après
-   l'autre et la dernière qui a marché est réutilisée.
-2. **Arctic Shift** (archive JSON, en dernier recours) : très fiable, mais seulement les posts
-   les plus récents, scores figés au moment de l'archivage, et pas de r/popular.
+1. **Redlib**: a free Reddit frontend hosted by volunteers. It provides live data and the
+   Popular / New / Top / Rising sorting options. Several instances are tried in sequence,
+   and the last working one is reused.
+2. **Arctic Shift** (JSON archive, as a last resort): very reliable, but only includes the
+   most recent posts, has scores frozen at the time of archiving, and does not support `r/popular`.
 
-La source utilisée s'affiche en bas de l'écran du bas.
+The active data source is displayed at the bottom of the lower screen.
 
-## Paramètres (SELECT)
+## Settings (SELECT)
 
-| Réglage                | Valeurs                                                                 |
-|------------------------|-------------------------------------------------------------------------|
-| Langue de l'interface  | Français, English (par défaut : langue de la console)                   |
-| Langue du contenu      | Tout (r/popular), Français, English, Español, Deutsch, Italiano, Português : le fil d'accueil regroupe les grands subreddits de cette langue |
-| Tri par défaut         | Populaires, Nouveaux, Top 24 h, En hausse                               |
-| Au démarrage           | Fil d'accueil ou un subreddit au choix                                 |
-| Contenu NSFW           | Masquer (retiré du fil), Flouter (image cachée jusqu'à A), Afficher    |
-| Images                 | Toutes, Légères (petits aperçus seulement), Aucune (économie de données) |
-| Taille du texte        | Petit, Normal, Grand                                                    |
-| Traduire vers          | Français, English, Español, Deutsch, Italiano, Português (Google Traduction, MyMemory en secours) |
-| Qualité vidéo max      | Auto (360p New 3DS, 270p Old 3DS), 220p, 270p, 360p                     |
-| Lecture vidéo          | Direct (en flux, démarre vite) ou Préchargement (la vidéo et le son sont d'abord entièrement téléchargés sur la carte SD, puis lus sans coupure) |
-| Source des données     | Auto, Redlib, Archive                                                   |
-| Vider le cache d'images |                                                                        |
+| Setting | Options |
+|---|---|
+| Interface language | French, English (default: console language) |
+| Content language | All (`r/popular`), French, English, Spanish, German, Italian, Portuguese: the home feed groups major subreddits in the selected language |
+| Default sorting | Popular, New, Top 24 h, Rising |
+| On startup | Home feed or a selected subreddit |
+| NSFW content | Hide (removed from the feed), Blur (image hidden until A is pressed), Show |
+| Images | All, Lightweight (small previews only), None (save data) |
+| Text size | Small, Normal, Large |
+| Translate to | French, English, Spanish, German, Italian, Portuguese (Google Translate, with MyMemory as a fallback) |
+| Maximum video quality | Auto (360p on New 3DS, 270p on Old 3DS), 220p, 270p, 360p |
+| Video playback | Direct (streaming, starts quickly) or Preload (the video and audio are fully downloaded to the SD card first, then played without interruptions) |
+| Data source | Auto, Redlib, Archive |
+| Clear image cache | |
 
-Reddit ne traduit pas les posts : « langue du contenu » choisit des subreddits écrits dans
-cette langue. Les réglages sont enregistrés dans `sdmc:/3ds/reddit3ds/config.ini`, où l'on
-peut aussi modifier la liste des instances Redlib (`redlib=`) et ajouter un `client_id`.
+Reddit does not translate posts: **Content language** selects subreddits written in that language.
+Settings are saved to `sdmc:/3ds/reddit3ds/config.ini`. You can also edit the Redlib instance
+list (`redlib=`) there and add a `client_id`.
 
 ## Architecture
 
-```
+```text
 source/
-  main.c    écrans, mise en page, contrôles
-  ui.c/h    rendu citro2d : texte, cartes, pastilles, boutons tactiles, animations
-  image.c/h téléchargement + décodage JPEG/PNG en arrière-plan, cache de textures
-  job.c/h   requêtes Reddit dans un thread de travail (annulables)
-  settings.c/h paramètres (config.ini) et traductions FR/EN
-  reddit.c/h sources (Redlib, Arctic Shift, OAuth optionnel), modèle Post/Comment
-  html.c/h  extraction de texte depuis le HTML de Redlib
-  net.c/h   HTTP(S) via libcurl (handle réutilisé = keep-alive TLS)
-  json.c/h  parseur JSON minimal
-assets/     icône 48×48, bannière 256×128, son de bannière
+  main.c    screens, layout, controls
+  ui.c/h    citro2d rendering: text, cards, badges, touch buttons, animations
+  image.c/h background JPEG/PNG downloading and decoding, texture cache
+  job.c/h   Reddit requests in a worker thread (cancellable)
+  settings.c/h settings (`config.ini`) and FR/EN translations
+  reddit.c/h data sources (Redlib, Arctic Shift, optional OAuth), Post/Comment model
+  html.c/h  text extraction from Redlib HTML
+  net.c/h   HTTP(S) via libcurl (reused handle = TLS keep-alive)
+  json.c/h  minimal JSON parser
+assets/     48×48 icon, 256×128 banner, banner sound
 romfs/      cacert.pem
-app.rsf     description du titre pour makerom
+app.rsf     title description for makerom
 ```
 
-## Limites connues
+## Known limitations
 
-- Vidéos : le son nécessite `sdmc:/3ds/dspfirm.cdc` (à créer une fois avec l'outil DSP1).
-  Sur Old 3DS, le décodage est logiciel : 270p par défaut, filtre anti-blocs désactivé.
-  Pas d'avance rapide ; les vidéos YouTube ou externes ne sont pas lisibles.
-- Lecture seule (pas de vote, pas de commentaire, pas de connexion à un compte).
-- Le markdown est affiché brut.
-- Les réponses « + N non chargées » ne sont pas dépliables (jusqu'à 400 commentaires par post).
-- GIF animés : seul l'aperçu fixe est affiché ; galeries : première image seulement.
-- Pas de WebP (les images sont demandées en JPEG/PNG au CDN de Reddit).
+- Videos: sound requires `sdmc:/3ds/dspfirm.cdc` (create it once using the DSP1 tool).
+  On Old 3DS, decoding is done in software: 270p by default, with the deblocking filter disabled.
+  No seeking; YouTube and other external videos cannot be played.
+- Read-only (no voting, commenting, or account sign-in).
+- Markdown is displayed as raw text.
+- Replies shown as “+ N more not loaded” cannot be expanded (up to 400 comments per post).
+- Animated GIFs: only a static preview is displayed; galleries: only the first image is shown.
+- No WebP support (images are requested from Reddit's CDN as JPEG/PNG).
 
-## Dépannage vidéo
+## Video troubleshooting
 
-À chaque lecture, l'appli écrit `sdmc:/3ds/reddit3ds/video.log` (remis à zéro à chaque vidéo).
-Le son passe par le DSP : `app.rsf` doit mapper la mémoire DSP (`IORegisterMapping`), sinon le `.cia`
-plante au lancement d'une vidéo (le `.3dsx` lancé depuis Homebrew Launcher n'a pas ce problème).
-En cas de plantage, la **dernière ligne** du fichier indique l'étape atteinte (playlist, ouverture
-des pistes FFmpeg, création des threads, son, première image...).
+Each playback session writes `sdmc:/3ds/reddit3ds/video.log` (the file is reset for every video).
+Audio is handled by the DSP: `app.rsf` must map DSP memory (`IORegisterMapping`), otherwise the
+`.cia` crashes when a video is started (the `.3dsx` launched from the Homebrew Launcher does not
+have this issue).
+
+If the app crashes, the **last line** of the log file indicates the stage it reached (playlist,
+FFmpeg track opening, thread creation, audio, first frame, etc.).
