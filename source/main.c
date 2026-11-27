@@ -21,6 +21,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "audio.h"
 #include "image.h"
 #include "job.h"
 #include "net.h"
@@ -46,7 +47,10 @@ u32 __stacksize__ = 0x40000;
 #define CARD_X  6.0f
 #define CARD_W  388.0f
 #define PAD     8.0f
-#define THUMB   64.0f
+/* Disposition du fil (paramètres « Disposition » et « Miniatures ») : voir apply_layout() */
+static float g_thumb = 64.0f, g_title_sc = 0.5f;
+static int   g_title_lines = 4;
+#define THUMB g_thumb
 #define BODY_IMG_H 168.0f
 
 typedef enum { SCR_FEED, SCR_POST, SCR_IMAGE, SCR_SEARCH, SCR_SETTINGS, SCR_VIDEO, SCR_SERVERS } Screen;
@@ -139,7 +143,7 @@ static char   g_recent[10][64];
 static int    g_nrecent;
 
 /* Paramètres */
-enum { SET_UI_LANG, SET_CONTENT, SET_HOME, SET_SUGGEST, SET_SORT, SET_START, SET_NSFW, SET_IMAGES, SET_IMGQ, SET_TEXT, SET_TRANSLATE,
+enum { SET_UI_LANG, SET_CONTENT, SET_HOME, SET_SUGGEST, SET_SORT, SET_START, SET_NSFW, SET_IMAGES, SET_IMGQ, SET_TEXT, SET_THEME, SET_DENSITY, SET_THUMBS, SET_BUTTONS, SET_LR, SET_SLIDER, SET_SFX, SET_SFXPACK, SET_MUSIC, SET_MUSICVOL, SET_TRANSLATE,
        SET_VIDEO, SET_VMODE, SET_COMBATCH, SET_SOURCE, SET_SERVER, SET_STATUS, SET_CLEAR, SET_COUNT };
 #define SET_ROW_H 36.0f
 static int    g_set_sel;
@@ -428,8 +432,8 @@ static void build_cards(void)
         Card *c = &g_cards[i];
         bool media = has_media(p);
         float tw = CARD_W - 2 * PAD - (media ? THUMB + PAD : 0);
-        doc_text(&c->title, p->title, 0.5f, 0, tw, p->stickied ? COL_GREEN : COL_TEXT, 0);
-        doc_truncate(&c->title, 4);
+        doc_text(&c->title, p->title, g_title_sc, 0, tw, p->stickied ? COL_GREEN : COL_TEXT, 0);
+        doc_truncate(&c->title, g_title_lines);
         float h = PAD + ui_line_height(0.4f) + 3 + c->title.h + 5 + ui_line_height(0.42f) + PAD;
         if (media && h < THUMB + 2 * PAD) h = THUMB + 2 * PAD;
         c->y = y;
@@ -480,6 +484,7 @@ static void feed_move(int d)
     if (s != g_sel) {
         g_sel = s;
         g_sel_stable = 0;
+        sfx_play(SFX_NAV);
     }
     feed_ensure_visible();
 }
@@ -852,6 +857,7 @@ static int kb_layout(Key *keys)
 
 static void kb_type(int code)
 {
+    sfx_play(SFX_KEY);
     size_t len = strlen(g_query);
     if (code == K_BS) {
         if (len > 0) g_query[len - 1] = '\0';
@@ -889,6 +895,26 @@ static void rebuild_all(void)
 
 static const float TEXT_SCALES[TEXT_SIZES] = { 0.9f, 1.0f, 1.12f };
 
+/* Taille du texte : réglage × curseur 3D (si le curseur règle la taille) */
+static float g_slider_text = 1.0f;
+
+static void apply_text_scale(void)
+{
+    ui_set_text_scale(TEXT_SCALES[g_cfg.text_size] * (g_cfg.slider == S3D_TEXT ? g_slider_text : 1.0f));
+}
+
+/* Thème, disposition et commandes : appliqués au démarrage et à chaque changement */
+static void apply_look(void)
+{
+    ui_set_theme(g_cfg.theme);
+    ui_set_glyph_swap(g_cfg.buttons != BTN_STD, g_cfg.buttons == BTN_SWAP_ABXY);
+    switch (g_cfg.density) {
+    case DENS_COMPACT: g_thumb = 44; g_title_sc = 0.46f; g_title_lines = 2; break;
+    case DENS_LARGE:   g_thumb = 88; g_title_sc = 0.56f; g_title_lines = 5; break;
+    default:           g_thumb = 64; g_title_sc = 0.5f;  g_title_lines = 4; break;
+    }
+}
+
 static const char *set_label(int i)
 {
     switch (i) {
@@ -902,6 +928,16 @@ static const char *set_label(int i)
     case SET_IMAGES:  return TR("Images", "Images");
     case SET_IMGQ:    return TR("Qualité des images", "Image quality");
     case SET_TEXT:    return TR("Taille du texte", "Text size");
+    case SET_THEME:   return TR("Thème", "Theme");
+    case SET_DENSITY: return TR("Disposition du fil", "Feed layout");
+    case SET_THUMBS:  return TR("Miniatures", "Thumbnails");
+    case SET_BUTTONS: return TR("Boutons", "Buttons");
+    case SET_LR:      return TR("L / R dans le fil", "L / R in the feed");
+    case SET_SLIDER:  return TR("Curseur 3D", "3D slider");
+    case SET_SFX:      return TR("Sons de l'interface", "Interface sounds");
+    case SET_SFXPACK:  return TR("Pack de sons", "Sound pack");
+    case SET_MUSIC:    return TR("Musique de fond", "Background music");
+    case SET_MUSICVOL: return TR("Volume de la musique", "Music volume");
     case SET_TRANSLATE: return TR("Traduire vers", "Translate to");
     case SET_VIDEO: return TR("Qualité vidéo max", "Max video quality");
     case SET_VMODE: return TR("Lecture vidéo", "Video playback");
@@ -951,6 +987,36 @@ static void set_value(int i, char *o, size_t n)
         if (settings_comment_batch() > 0) snprintf(o, n, "%d", settings_comment_batch());
         else snprintf(o, n, "%s", TR("Tous", "All"));
         break;
+    case SET_THEME: snprintf(o, n, "%s", ui_theme_name(g_cfg.theme, g_cfg.ui_lang != LANG_EN)); break;
+    case SET_DENSITY: {
+        const char *v[] = { TR("Normale", "Normal"), TR("Compacte", "Compact"), TR("Grande", "Large") };
+        snprintf(o, n, "%s", v[g_cfg.density]);
+        break;
+    }
+    case SET_THUMBS: snprintf(o, n, "%s", g_cfg.thumb_left ? TR("À gauche", "Left") : TR("À droite", "Right")); break;
+    case SET_BUTTONS: {
+        const char *v[] = { "Standard", TR("A / B inversés", "A / B swapped"), TR("A/B et X/Y inversés", "A/B and X/Y swapped") };
+        snprintf(o, n, "%s", v[g_cfg.buttons]);
+        break;
+    }
+    case SET_LR: snprintf(o, n, "%s", g_cfg.lr_mode == LR_PAGE ? TR("Défiler", "Scroll") : TR("Changer le tri", "Change sort")); break;
+    case SET_SFX:
+        if (!audio_ok()) snprintf(o, n, "%s", TR("dspfirm.cdc manquant", "dspfirm.cdc missing"));
+        else snprintf(o, n, "%s", g_cfg.sfx ? TR("Activés", "On") : TR("Désactivés", "Off"));
+        break;
+    case SET_SFXPACK: snprintf(o, n, "%s", g_cfg.sfx_pack[0] ? g_cfg.sfx_pack : TR("Par défaut", "Default")); break;
+    case SET_MUSIC:
+        if (!strcmp(g_cfg.music, "off")) snprintf(o, n, "%s", TR("Désactivée", "Off"));
+        else if (!g_cfg.music[0]) snprintf(o, n, "%s", TR("Par défaut (calme)", "Default (calm)"));
+        else if (!strcmp(g_cfg.music, "*")) snprintf(o, n, "%s", TR("Au hasard", "Shuffle"));
+        else snprintf(o, n, "%s", g_cfg.music);
+        break;
+    case SET_MUSICVOL: snprintf(o, n, "%d %%", (g_cfg.music_vol + 1) * 25); break;
+    case SET_SLIDER: {
+        const char *v[] = { TR("Désactivé", "Off"), TR("Zoom", "Zoom"), TR("Volume vidéo", "Video volume"), TR("Taille du texte", "Text size") };
+        snprintf(o, n, "%s", v[g_cfg.slider]);
+        break;
+    }
     case SET_TEXT: {
         const char *v[] = { TR("Petit", "Small"), TR("Normal", "Normal"), TR("Grand", "Large") };
         snprintf(o, n, "%s", v[g_cfg.text_size]);
@@ -1040,6 +1106,57 @@ static const char *set_help(int i)
                   "of the list. Fewer = faster display and translation.");
     case SET_TEXT:
         return TR("Taille des textes dans toute l'application.", "Size of text throughout the app.");
+    case SET_THEME:
+        return TR("Couleurs de l'application. « 3DS » reprend le style du menu HOME (fond gris rayé, panneaux "
+                  "blancs, bleu ou rouge comme les consoles). Clair, Sombre, Noir (écrans très sombres) et Nuit bleue.",
+                  "App colours. \"3DS\" follows the HOME Menu style (striped grey background, white panels, blue or "
+                  "red like the consoles). Light, Dark, Black (very dark screens) and Midnight blue.");
+    case SET_DENSITY:
+        return TR("Taille des cartes du fil. Compacte : petites miniatures, titres sur 2 lignes, plus de posts à "
+                  "l'écran. Grande : grandes miniatures et titres plus gros.",
+                  "Size of the feed cards. Compact: small thumbnails, 2-line titles, more posts on screen. "
+                  "Large: big thumbnails and larger titles.");
+    case SET_THUMBS:
+        return TR("Côté où s'affiche la miniature dans les cartes du fil.",
+                  "Side of the feed cards where the thumbnail is shown.");
+    case SET_BUTTONS:
+        return TR("Inverse les boutons dans toute l'application (les icônes affichées suivent). « A / B inversés » : "
+                  "B valide et A revient en arrière. « A/B et X/Y inversés » : disposition façon manette Xbox.",
+                  "Swaps the buttons everywhere in the app (the icons shown follow). \"A / B swapped\": B confirms "
+                  "and A goes back. \"A/B and X/Y swapped\": Xbox-style layout.");
+    case SET_LR:
+        return TR("Changer le tri : L / R passent de Populaires à Nouveaux, Top, En hausse. Défiler : L / R "
+                  "sautent de 4 posts, et la croix gauche / droite change le tri.",
+                  "Change sort: L / R switch between Hot, New, Top and Rising. Scroll: L / R jump 4 posts, and "
+                  "D-pad left / right changes the sort.");
+    case SET_SFX:
+        return TR("Petits sons quand tu navigues, valides, reviens en arrière, changes un réglage, tapes au clavier... "
+                  "Nécessite sdmc:/3ds/dspfirm.cdc (outil DSP1), comme le son des vidéos.",
+                  "Short sounds when you browse, confirm, go back, change a setting, type... Needs "
+                  "sdmc:/3ds/dspfirm.cdc (DSP1 tool), like video sound.");
+    case SET_SFXPACK:
+        return TR("Par défaut : sons de Kenney (domaine public). Tes packs : sdmc:/3ds/reddit3ds/sons/<pack>/ avec un "
+                  "dossier par son (navigation, valider, retour, ouvrir, changer, onglet, erreur, notification, touche). "
+                  "Copie le dossier _modele ; mode d'emploi dans sons/LISEZMOI.txt.",
+                  "Default: Kenney sounds (public domain). Your packs: sdmc:/3ds/reddit3ds/sons/<pack>/ with one "
+                  "folder per sound (navigation, valider, retour, ouvrir, changer, onglet, erreur, notification, touche). "
+                  "Copy the _modele folder; instructions in sons/LISEZMOI.txt.");
+    case SET_MUSIC:
+        return TR("Musique en boucle, en pause pendant les vidéos. Par défaut : « Heavenly Loop » (isaiah658, domaine "
+                  "public), calme. Tes musiques (.ogg, .mp3, .wav, .m4a) : sdmc:/3ds/reddit3ds/musique/, un morceau "
+                  "précis ou « Au hasard ».",
+                  "Looping music, paused during videos. Default: \"Heavenly Loop\" (isaiah658, public domain), calm. "
+                  "Your music (.ogg, .mp3, .wav, .m4a): sdmc:/3ds/reddit3ds/musique/, one track or \"Shuffle\".");
+    case SET_MUSICVOL:
+        return TR("Volume de la musique de fond (les sons de l'interface gardent leur volume).",
+                  "Background music volume (interface sounds keep their own volume).");
+    case SET_SLIDER:
+        return TR("Fonction du curseur 3D (la 3D reste désactivée). Zoom : zoome dans les images et les vidéos. "
+                  "Volume vidéo : règle le son des vidéos. Taille du texte : en bas = taille réglée, en haut = "
+                  "jusqu'à 50 % plus grand. Sans effet sur 2DS (pas de curseur).",
+                  "What the 3D slider does (3D stays off). Zoom: zooms into images and videos. Video volume: sets "
+                  "the video sound. Text size: bottom = your size, top = up to 50 % larger. No effect on 2DS "
+                  "(no slider).");
     case SET_TRANSLATE:
         return TR("Langue utilisée par le bouton " BTN_Y " Traduire d'un post (titre, texte et commentaires). "
                   "La traduction passe par Google Traduction (sans compte), ou MyMemory en secours.",
@@ -1142,7 +1259,68 @@ static void set_change(int i, int d)
         break;
     case SET_TEXT:
         g_cfg.text_size = cycle(g_cfg.text_size, d, TEXT_SIZES);
-        ui_set_text_scale(TEXT_SCALES[g_cfg.text_size]);
+        apply_text_scale();
+        rebuild_all();
+        break;
+    case SET_THEME:
+        g_cfg.theme = cycle(g_cfg.theme, d == 0 ? 1 : d, THEMES);
+        apply_look();
+        rebuild_all(); /* les textes mis en page gardent leur couleur : on les refait */
+        break;
+    case SET_DENSITY:
+        g_cfg.density = cycle(g_cfg.density, d == 0 ? 1 : d, DENSITIES);
+        apply_look();
+        rebuild_all();
+        break;
+    case SET_THUMBS:
+        g_cfg.thumb_left = !g_cfg.thumb_left;
+        break;
+    case SET_BUTTONS:
+        g_cfg.buttons = cycle(g_cfg.buttons, d == 0 ? 1 : d, BTN_LAYOUTS);
+        apply_look();
+        break;
+    case SET_LR:
+        g_cfg.lr_mode = cycle(g_cfg.lr_mode, d == 0 ? 1 : d, LR_MODES);
+        break;
+    case SET_SFX:
+        g_cfg.sfx = !g_cfg.sfx;
+        audio_apply();
+        break;
+    case SET_SFXPACK: {
+        char packs[24][48];
+        int np = audio_packs(packs, 24), cur = -1;
+        for (int k = 0; k < np; k++)
+            if (!strcmp(packs[k], g_cfg.sfx_pack)) cur = k;
+        int v = cycle(cur + 1, d == 0 ? 1 : d, np + 1) - 1; /* -1 = par défaut */
+        snprintf(g_cfg.sfx_pack, sizeof(g_cfg.sfx_pack), "%s", v < 0 ? "" : packs[v]);
+        audio_apply();
+        if (np == 0) ui_toast(TR("Aucun pack dans sdmc:/3ds/reddit3ds/sons", "No pack in sdmc:/3ds/reddit3ds/sons"));
+        break;
+    }
+    case SET_MUSIC: {
+        /* ordre : désactivée, par défaut, au hasard, puis chaque morceau du dossier musique */
+        char tracks[32][96];
+        int nt = audio_tracks(tracks, 32), cur = 0;
+        if (!g_cfg.music[0]) cur = 1;
+        else if (!strcmp(g_cfg.music, "*")) cur = 2;
+        else if (strcmp(g_cfg.music, "off"))
+            for (int k = 0; k < nt; k++)
+                if (!strcmp(tracks[k], g_cfg.music)) cur = 3 + k;
+        int nopt = nt > 0 ? 3 + nt : 2;
+        if (cur >= nopt) cur = 0;
+        int v = cycle(cur, d == 0 ? 1 : d, nopt);
+        snprintf(g_cfg.music, sizeof(g_cfg.music), "%s", v == 0 ? "off" : v == 1 ? "" : v == 2 ? "*" : tracks[v - 3]);
+        audio_apply();
+        break;
+    }
+    case SET_MUSICVOL:
+        g_cfg.music_vol = cycle(g_cfg.music_vol, d == 0 ? 1 : d, 4);
+        audio_apply();
+        break;
+    case SET_SLIDER:
+        g_cfg.slider = cycle(g_cfg.slider, d == 0 ? 1 : d, S3D_MODES);
+        g_slider_text = 1.0f;
+        apply_text_scale();
         rebuild_all();
         break;
     case SET_TRANSLATE:
@@ -1174,19 +1352,88 @@ static void set_change(int i, int d)
     case SET_CLEAR:
         if (g_online) img_drop_all();
         ui_toast(TR("Cache d'images vidé", "Image cache cleared"));
+        sfx_play(SFX_NOTIFY);
         return;
     }
     g_set_dirty = true;
     g_set_help_for = -2;
 }
 
+/* Paramètres rangés par sections : en-têtes (valeurs négatives) puis lignes SET_* */
+enum { SEC_DISPLAY = -1, SEC_CONTENT = -2, SEC_VIDEO = -3, SEC_CONTROLS = -4, SEC_SOUND = -5, SEC_NETWORK = -6 };
+static const int SET_ORDER[] = {
+    SEC_DISPLAY,  SET_UI_LANG, SET_THEME, SET_TEXT, SET_DENSITY, SET_THUMBS, SET_IMAGES, SET_IMGQ,
+    SEC_CONTENT,  SET_CONTENT, SET_HOME, SET_SUGGEST, SET_SORT, SET_START, SET_NSFW, SET_COMBATCH, SET_TRANSLATE,
+    SEC_VIDEO,    SET_VIDEO, SET_VMODE,
+    SEC_CONTROLS, SET_BUTTONS, SET_LR, SET_SLIDER,
+    SEC_SOUND,    SET_SFX, SET_SFXPACK, SET_MUSIC, SET_MUSICVOL,
+    SEC_NETWORK,  SET_SOURCE, SET_SERVER, SET_STATUS, SET_CLEAR,
+};
+#define NORDER ((int)(sizeof(SET_ORDER) / sizeof(SET_ORDER[0])))
+_Static_assert(sizeof(SET_ORDER) / sizeof(SET_ORDER[0]) == SET_COUNT + 6, "chaque réglage SET_* doit figurer une fois dans SET_ORDER");
+#define SEC_H  24.0f
+
+static const char *sec_name(int s)
+{
+    switch (s) {
+    case SEC_DISPLAY:  return TR("Affichage", "Display");
+    case SEC_CONTENT:  return TR("Contenu", "Content");
+    case SEC_VIDEO:    return TR("Vidéo", "Video");
+    case SEC_CONTROLS: return TR("Commandes", "Controls");
+    case SEC_SOUND:    return TR("Sons", "Sound");
+    default:           return TR("Réseau et données", "Network and data");
+    }
+}
+
+/* Position verticale (sans défilement) de l'élément k de SET_ORDER */
+static float set_item_y(int k)
+{
+    float y = HEAD_H + 6;
+    for (int i = 0; i < k; i++) y += SET_ORDER[i] < 0 ? SEC_H : SET_ROW_H + 4;
+    return y;
+}
+
+static int set_index(int id)
+{
+    for (int k = 0; k < NORDER; k++)
+        if (SET_ORDER[k] == id) return k;
+    return 1;
+}
+
+/* Section de la ligne id */
+static int set_section(int id)
+{
+    int sec = SEC_DISPLAY;
+    for (int k = 0; k < NORDER; k++) {
+        if (SET_ORDER[k] < 0) sec = SET_ORDER[k];
+        else if (SET_ORDER[k] == id) break;
+    }
+    return sec;
+}
+
+/* Ligne suivante / précédente (les en-têtes sont sautés, la liste boucle) */
+static void set_step(int d)
+{
+    int k = set_index(g_set_sel);
+    do { k = (k + d + NORDER) % NORDER; } while (SET_ORDER[k] < 0);
+    g_set_sel = SET_ORDER[k];
+    sfx_play(SFX_NAV);
+}
+
+static float set_total_h(void)
+{
+    return set_item_y(NORDER) + 40;
+}
+
 static void set_ensure_visible(void)
 {
-    float top = HEAD_H + 6 + g_set_sel * (SET_ROW_H + 4);
-    float total = HEAD_H + 6 + SET_COUNT * (SET_ROW_H + 4) + 40;
+    int k = set_index(g_set_sel);
+    float top = set_item_y(k);
+    /* la ligne juste sous un en-tête : on montre aussi l'en-tête */
+    if (k > 0 && SET_ORDER[k - 1] < 0) top -= SEC_H;
     if (top - 6 < g_set_to + HEAD_H) g_set_to = top - 6 - HEAD_H;
-    if (top + SET_ROW_H + 6 > g_set_to + SCR_H) g_set_to = top + SET_ROW_H + 6 - SCR_H;
-    clamp_scroll(&g_set_to, total, SCR_H);
+    if (set_item_y(k) + SET_ROW_H + 6 > g_set_to + SCR_H) g_set_to = set_item_y(k) + SET_ROW_H + 6 - SCR_H;
+    clamp_scroll(&g_set_to, set_total_h(), SCR_H);
 }
 
 static void open_settings(void)
@@ -1403,6 +1650,7 @@ static void open_video(void)
     g_zoom = 1; /* même zoom que la visionneuse d'images */
     g_pan_x = g_pan_y = 0;
     g_scrubbing = false;
+    music_pause(true); /* la musique de fond se tait pendant la vidéo */
     if (!video_open(p->video_id, settings_video_maxp(), g_cfg.video_mode == VM_PRELOAD))
         ui_toast(video_error());
 }
@@ -1410,6 +1658,7 @@ static void open_video(void)
 static void close_video(void)
 {
     video_close();
+    music_pause(false);
     g_screen = g_video_back;
 }
 
@@ -1447,6 +1696,7 @@ static void toggle_subscription(const char *sub)
     else if (now) snprintf(msg, sizeof(msg), TR("Abonné à r/%s", "Joined r/%s"), sub);
     else snprintf(msg, sizeof(msg), TR("Désabonné de r/%s", "Left r/%s"), sub);
     ui_toast(msg);
+    sfx_play(was != now ? SFX_NOTIFY : SFX_ERROR);
     if (was != now && !settings_save()) ui_toast(TR("Impossible d'enregistrer config.ini", "Couldn't save config.ini"));
 }
 
@@ -1480,8 +1730,26 @@ static void leave_settings(void)
     }
 }
 
+/* Son associé à une action de l'utilisateur */
+static void action_sound(Action a)
+{
+    switch (a) {
+    case ACT_BACK: sfx_play(SFX_BACK); break;
+    case ACT_OPEN: case ACT_VIEW: sfx_play(SFX_OPEN); break;
+    case ACT_VIDEO_PLAY: case ACT_SET_ACTIVATE: case ACT_SRV_USE: case ACT_SRV_AUTO: case ACT_SUBSCRIBE:
+    case ACT_ZOOM_RESET: case ACT_REFRESH: case ACT_SRV_TEST:
+        sfx_play(SFX_OK); break;
+    case ACT_SORT_NEXT: case ACT_SORT_PREV: case ACT_SET_PREV: case ACT_SET_NEXT: case ACT_VOL_UP: case ACT_VOL_DOWN:
+    case ACT_ZOOM_IN: case ACT_ZOOM_OUT: case ACT_SEEK_BACK: case ACT_SEEK_FWD:
+        sfx_play(SFX_CHANGE); break;
+    case ACT_SEARCH: case ACT_SETTINGS: case ACT_TRANSLATE: sfx_play(SFX_TAB); break;
+    default: break;
+    }
+}
+
 static void do_action(Action a)
 {
+    action_sound(a);
     switch (a) {
     case ACT_SEARCH: open_search_tab(); break;
     case ACT_SORT_NEXT: change_sort(+1); break;
@@ -1570,6 +1838,8 @@ static void do_action(Action a)
 
 static void handle_job(Job *j)
 {
+    if (j->rc != 0 && j->rc != -2 && j->type != JOB_STATUS) sfx_play(SFX_ERROR);
+    if (j->type == JOB_STATUS && j->rc != -2) sfx_play(SFX_NOTIFY);
     if (j->rc == 0) snprintf(g_source, sizeof(g_source), "%s", reddit_source());
 
     switch (j->type) {
@@ -1693,8 +1963,7 @@ static void pump_jobs(void)
 
 static void draw_header(float w, const char *title, const char *right, bool busy)
 {
-    C2D_DrawRectSolid(0, 0, 0.5f, w, HEAD_H, COL_BAR);
-    C2D_DrawRectSolid(0, HEAD_H - 1, 0.5f, w, 1, COL_LINE);
+    ui_bar_bg(0, 0, w, HEAD_H, true);
     ui_logo(14, HEAD_H / 2, 8);
     ui_text(28, (HEAD_H - ui_line_height(0.55f)) / 2, 0.55f, COL_WHITE, title);
     float rx = w - 8;
@@ -1709,8 +1978,7 @@ static void draw_header(float w, const char *title, const char *right, bool busy
 
 static void draw_toolbar_bg(void)
 {
-    C2D_DrawRectSolid(0, TOOL_Y, 0.5f, BOT_W, TOOL_H, COL_BAR);
-    C2D_DrawRectSolid(0, TOOL_Y, 0.5f, BOT_W, 1, COL_LINE);
+    ui_bar_bg(0, TOOL_Y, BOT_W, TOOL_H, false);
 }
 
 /*
@@ -1750,9 +2018,9 @@ static void draw_media_box(const char *url, float x, float y, float w, float h, 
     if (video && !hidden) {
         float r = small ? 10 : 18;
         C2D_DrawCircleSolid(x + w / 2, y + h / 2, 0.5f, r, COL_SCRIM);
-        C2D_DrawTriangle(x + w / 2 - r * 0.35f, y + h / 2 - r * 0.5f, COL_WHITE,
-                         x + w / 2 - r * 0.35f, y + h / 2 + r * 0.5f, COL_WHITE,
-                         x + w / 2 + r * 0.55f, y + h / 2, COL_WHITE, 0.5f);
+        C2D_DrawTriangle(x + w / 2 - r * 0.35f, y + h / 2 - r * 0.5f, COL_OVERLAY,
+                         x + w / 2 - r * 0.35f, y + h / 2 + r * 0.5f, COL_OVERLAY,
+                         x + w / 2 + r * 0.55f, y + h / 2, COL_OVERLAY, 0.5f);
     }
 }
 
@@ -1764,10 +2032,10 @@ static void draw_card(int i, float y)
     const Post *p = &g_feed.items[i];
     const Card *c = &g_cards[i];
     bool sel = (i == g_sel);
-    if (sel) ui_rrect(CARD_X - 2, y - 2, CARD_W + 4, c->h + 4, 11, COL_ACCENT);
-    ui_rrect(CARD_X, y, CARD_W, c->h, 9, sel ? COL_CARD_HI : COL_CARD);
+    ui_card(CARD_X, y, CARD_W, c->h, 9, sel);
 
-    float tx = CARD_X + PAD, ty = y + PAD;
+    bool left = g_cfg.thumb_left && has_media(p); /* miniature à gauche : le texte se décale */
+    float tx = CARD_X + PAD + (left ? THUMB + PAD : 0), ty = y + PAD;
     char buf[160], age[24];
     snprintf(buf, sizeof(buf), "r/%s", p->sub);
     ui_text(tx, ty, 0.4f, COL_ACCENT2, buf);
@@ -1799,20 +2067,20 @@ static void draw_card(int i, float y)
     ui_text(x + 13, ty, 0.42f, COL_DIM, ncom);
     x += 13 + ui_text_width(ncom, 0.42f) + 10;
 
-    float limit = CARD_X + CARD_W - PAD - (has_media(p) ? THUMB + PAD : 0);
+    float limit = CARD_X + CARD_W - PAD - (has_media(p) && !left ? THUMB + PAD : 0);
     const char *vid = TR("Vidéo", "Video"), *gal = TR("Galerie", "Gallery");
     if (p->nsfw && x + ui_pill_width("NSFW", 0.38f) < limit)
-        x += ui_pill(x, ty, "NSFW", 0.38f, COL_RED, COL_WHITE) + 4;
+        x += ui_pill(x, ty, "NSFW", 0.38f, COL_RED, COL_ONACC) + 4;
     if (p->is_video && x + ui_pill_width(vid, 0.38f) < limit)
-        x += ui_pill(x, ty, vid, 0.38f, C2D_Color32(0x1E, 0x4E, 0x78, 0xFF), COL_WHITE) + 4;
+        x += ui_pill(x, ty, vid, 0.38f, C2D_Color32(0x1E, 0x4E, 0x78, 0xFF), COL_ONACC) + 4;
     if (p->is_gallery && x + ui_pill_width(gal, 0.38f) < limit)
-        x += ui_pill(x, ty, gal, 0.38f, C2D_Color32(0x2E, 0x5E, 0x3A, 0xFF), COL_WHITE) + 4;
+        x += ui_pill(x, ty, gal, 0.38f, C2D_Color32(0x2E, 0x5E, 0x3A, 0xFF), COL_ONACC) + 4;
     if (p->flair[0] && x + ui_pill_width(p->flair, 0.38f) < limit)
         x += ui_pill(x, ty, p->flair, 0.38f, COL_LINE, COL_TEXT) + 4;
 
     if (has_media(p)) {
         const char *t = card_thumb(p);
-        draw_media_box(t, CARD_X + CARD_W - PAD - THUMB, y + PAD, THUMB, THUMB, IMG_THUMB,
+        draw_media_box(t, left ? CARD_X + PAD : CARD_X + CARD_W - PAD - THUMB, y + PAD, THUMB, THUMB, IMG_THUMB,
                        t != NULL, p->is_video, media_hidden(p), NULL);
     }
 }
@@ -1848,17 +2116,18 @@ static void chip_ensure_visible(void)
 static void chip_move(int d)
 {
     if (g_nchips == 0) return;
+    int before = g_chip_sel;
     g_chip_sel += d;
     if (g_chip_sel < 0) g_chip_sel = 0;
     if (g_chip_sel >= g_nchips) g_chip_sel = g_nchips - 1;
+    if (g_chip_sel != before) sfx_play(SFX_NAV);
     chip_ensure_visible();
 }
 
 static void draw_home_strip(float y)
 {
     bool focus = g_sel < 0;
-    if (focus) ui_rrect(CARD_X - 2, y - 2, CARD_W + 4, STRIP_H + 4, 11, COL_ACCENT);
-    ui_rrect(CARD_X, y, CARD_W, STRIP_H, 9, focus ? COL_CARD_HI : COL_CARD);
+    ui_card(CARD_X, y, CARD_W, STRIP_H, 9, focus);
     float x = CARD_X + 8 - g_chip_scroll;
     float py = y + (STRIP_H - ui_line_height(CHIP_SC) - 2) / 2;
     for (int i = 0; i < g_nchips; i++) {
@@ -1869,7 +2138,7 @@ static void draw_home_strip(float y)
             bool sel = focus && i == g_chip_sel;
             bool sub = i < g_nchip_subs;
             if (sel) ui_rrect(x - 2, py - 2, w + 4, ui_line_height(CHIP_SC) + 6, 7, COL_WHITE);
-            ui_pill(x, py, b, CHIP_SC, sub ? COL_ACCENT : COL_LINE, COL_WHITE);
+            ui_pill(x, py, b, CHIP_SC, sub ? COL_ACCENT : COL_CARD_HI, sub ? COL_ONACC : COL_WHITE);
         }
         x += w + CHIP_GAP;
     }
@@ -1904,8 +2173,7 @@ static void draw_home_chips_bottom(void)
 
 static void draw_feed_top(void)
 {
-    C2D_TargetClear(g_top, COL_BG);
-    C2D_SceneBegin(g_top);
+    ui_screen_begin(g_top, TOP_W);
     float off = -g_scroll;
     if (home_strip()) {
         float sy = HEAD_H + 6 + off;
@@ -1921,8 +2189,7 @@ static void draw_feed_top(void)
     if (g_feed.after[0]) {
         float y = g_feed_h - 38 + off;
         bool sel = (g_sel == g_feed.n);
-        if (sel) ui_rrect(CARD_X - 2, y - 2, CARD_W + 4, 32, 11, COL_ACCENT);
-        ui_rrect(CARD_X, y, CARD_W, 28, 9, sel ? COL_CARD_HI : COL_CARD);
+        ui_card(CARD_X, y, CARD_W, 28, 9, sel);
         if (loading(JOB_FEED, 1)) {
             ui_spinner(TOP_W / 2 - 50, y + 14, 6, COL_ACCENT);
             ui_text(TOP_W / 2 - 38, y + 7, 0.45f, COL_DIM, TR("Chargement...", "Loading..."));
@@ -1965,8 +2232,7 @@ static void draw_feed_top(void)
 
 static void draw_feed_bottom(void)
 {
-    C2D_TargetClear(g_bot, COL_BG);
-    C2D_SceneBegin(g_bot);
+    ui_screen_begin(g_bot, BOT_W);
 
     if (g_sel >= 0 && g_sel < g_feed.n) {
         const Post *p = &g_feed.items[g_sel];
@@ -2009,7 +2275,9 @@ static void draw_feed_bottom(void)
     float bx = 5;
     if (ui_button(bx, by, bw, bh, BTN_Y " Subs", false, true)) g_act = ACT_SEARCH;
     bx += st;
-    if (ui_button(bx, by, bw, bh, TR(BTN_R " Tri", BTN_R " Sort"), false, true)) g_act = ACT_SORT_NEXT;
+    if (ui_button(bx, by, bw, bh, g_cfg.lr_mode == LR_PAGE ? TR(BTN_DPAD " Tri", BTN_DPAD " Sort") : TR(BTN_R " Tri", BTN_R " Sort"),
+                  false, true))
+        g_act = ACT_SORT_NEXT;
     bx += st;
     if (ui_button(bx, by, bw, bh, TR(BTN_X " Actu.", BTN_X " Reload"), false, true)) g_act = ACT_REFRESH;
     bx += st;
@@ -2031,8 +2299,7 @@ static void draw_feed_bottom(void)
 static void draw_post_top(void)
 {
     const Post *p = cur_post();
-    C2D_TargetClear(g_top, COL_BG);
-    C2D_SceneBegin(g_top);
+    ui_screen_begin(g_top, TOP_W);
     if (!p) return;
 
     if (g_body_img_y >= 0) {
@@ -2108,8 +2375,7 @@ static void draw_comment_list(float vy, float vh)
 
 static void draw_post_bottom(void)
 {
-    C2D_TargetClear(g_bot, COL_BG);
-    C2D_SceneBegin(g_bot);
+    ui_screen_begin(g_bot, BOT_W);
 
     draw_comment_list(0, TOOL_Y);
 
@@ -2176,8 +2442,7 @@ static void draw_viewer_top(void)
 
 static void draw_viewer_bottom(void)
 {
-    C2D_TargetClear(g_bot, COL_BG);
-    C2D_SceneBegin(g_bot);
+    ui_screen_begin(g_bot, BOT_W);
     const Post *p = cur_post();
     if (p) {
         Doc d;
@@ -2229,8 +2494,7 @@ static void draw_search_bar(void)
 
 static void draw_search_top(void)
 {
-    C2D_TargetClear(g_top, COL_BG);
-    C2D_SceneBegin(g_top);
+    ui_screen_begin(g_top, TOP_W);
     float off = -g_s_scroll;
     char buf[160];
     bool icons = g_cfg.images != IMAGES_NONE;
@@ -2241,8 +2505,7 @@ static void draw_search_top(void)
         if (y > SCR_H || y + c->h < LIST_Y - 20) continue;
         if (c->section) ui_text(CARD_X + 4, y - 17, 0.42f, COL_DIM, c->section);
         bool sel = (i == g_s_sel);
-        if (sel) ui_rrect(CARD_X - 2, y - 2, CARD_W + 4, c->h + 4, 11, COL_ACCENT);
-        ui_rrect(CARD_X, y, CARD_W, c->h, 9, sel ? COL_CARD_HI : COL_CARD);
+        ui_card(CARD_X, y, CARD_W, c->h, 9, sel);
         const char *name = scard_name(c);
 
         if (c->kind != SC_RESULT) {
@@ -2252,7 +2515,7 @@ static void draw_search_top(void)
             ui_text(CARD_X + 34, y + (c->h - ui_line_height(0.5f)) / 2, 0.5f, COL_TEXT, buf);
             if (c->kind != SC_GOTO && settings_is_sub(name))
                 ui_pill(CARD_X + CARD_W - 12 - ui_pill_width(TR("abonné", "joined"), 0.38f), y + (c->h - ui_line_height(0.38f) - 2) / 2,
-                        TR("abonné", "joined"), 0.38f, COL_ACCENT, COL_WHITE);
+                        TR("abonné", "joined"), 0.38f, COL_ACCENT, COL_ONACC);
             continue;
         }
         const SubInfo *s = &g_subs.items[c->idx];
@@ -2262,7 +2525,7 @@ static void draw_search_top(void)
         float tx = ix + 48 + PAD, ty = iy;
         snprintf(buf, sizeof(buf), "r/%s", s->name);
         ui_text(tx, ty, 0.55f, COL_WHITE, buf);
-        if (s->nsfw) ui_pill(tx + ui_text_width(buf, 0.55f) + 6, ty + 2, "NSFW", 0.36f, COL_RED, COL_WHITE);
+        if (s->nsfw) ui_pill(tx + ui_text_width(buf, 0.55f) + 6, ty + 2, "NSFW", 0.36f, COL_RED, COL_ONACC);
         ty += ui_line_height(0.55f);
         fmt_members(buf, sizeof(buf), s->subscribers);
         ui_text(tx, ty, 0.4f, COL_ACCENT2, buf);
@@ -2295,8 +2558,7 @@ static void draw_search_top(void)
 
 static void draw_search_bottom(void)
 {
-    C2D_TargetClear(g_bot, COL_BG);
-    C2D_SceneBegin(g_bot);
+    ui_screen_begin(g_bot, BOT_W);
     char buf[128];
 
     /* bandeau : élément sélectionné (toucher = ouvrir) */
@@ -2329,7 +2591,7 @@ static void draw_search_bottom(void)
                                  : (pressed ? COL_LINE : (k->code == K_BS ? COL_CARD : COL_CARD_HI));
         ui_rrect(k->x, k->y, k->w, k->h, 7, bg);
         float sc = k->label[1] ? 0.42f : 0.55f;
-        ui_text_center(k->x + k->w / 2, k->y + (k->h - ui_line_height(sc)) / 2, sc, COL_WHITE, k->label);
+        ui_text_center(k->x + k->w / 2, k->y + (k->h - ui_line_height(sc)) / 2, sc, k->code == K_OK ? COL_ONACC : COL_WHITE, k->label);
     }
 }
 
@@ -2356,7 +2618,7 @@ static void draw_video_top(void)
     if (g_zoom > 1.01f) {
         char z[24];
         snprintf(z, sizeof(z), "Zoom %d %%", (int)(g_zoom * 100 + 0.5f));
-        ui_pill(8, 8, z, 0.4f, COL_SCRIM, COL_WHITE);
+        ui_pill(8, 8, z, 0.4f, COL_SCRIM, COL_OVERLAY);
     }
 
     VideoStatus st = video_status();
@@ -2365,7 +2627,7 @@ static void draw_video_top(void)
         fmt_time(a, sizeof(a), video_position());
         snprintf(line, sizeof(line), "%s %s", video_seek_paused() ? "||" : ">>", a);
         float pw = ui_pill_width(line, 0.5f);
-        ui_pill(TOP_W / 2 - pw / 2, SCR_H / 2 - 10, line, 0.5f, COL_SCRIM, COL_WHITE);
+        ui_pill(TOP_W / 2 - pw / 2, SCR_H / 2 - 10, line, 0.5f, COL_SCRIM, COL_OVERLAY);
         ui_spinner(TOP_W / 2, SCR_H / 2 + 30, 10, COL_ACCENT);
     }
     if (st == VS_ERROR) {
@@ -2376,9 +2638,9 @@ static void draw_video_top(void)
         float cx = TOP_W / 2, cy = SCR_H / 2;
         C2D_DrawCircleSolid(cx, cy, 0.5f, 26, COL_SCRIM);
         if (st == VS_PAUSED) {
-            C2D_DrawTriangle(cx - 8, cy - 13, COL_WHITE, cx - 8, cy + 13, COL_WHITE, cx + 14, cy, COL_WHITE, 0.5f);
+            C2D_DrawTriangle(cx - 8, cy - 13, COL_OVERLAY, cx - 8, cy + 13, COL_OVERLAY, cx + 14, cy, COL_OVERLAY, 0.5f);
         } else {
-            ui_text_center(cx, cy - 8, 0.45f, COL_WHITE, TR("Fin", "End"));
+            ui_text_center(cx, cy - 8, 0.45f, COL_OVERLAY, TR("Fin", "End"));
         }
     }
     ui_draw_toast(TOP_W);
@@ -2472,8 +2734,7 @@ static void draw_video_panel(void)
 /* Onglets du bas : contrôles / commentaires (se dessinent après la liste pour cacher son débordement) */
 static void draw_video_tabs(void)
 {
-    C2D_DrawRectSolid(0, 0, 0.5f, BOT_W, VTAB_H, COL_BAR);
-    C2D_DrawRectSolid(0, VTAB_H - 1, 0.5f, BOT_W, 1, COL_LINE);
+    ui_bar_bg(0, 0, BOT_W, VTAB_H, true);
     const char *lab[2] = { TR("Contrôles", "Controls"), TR("Commentaires", "Comments") };
     for (int i = 0; i < 2; i++) {
         char buf[48];
@@ -2488,8 +2749,7 @@ static void draw_video_tabs(void)
 
 static void draw_video_bottom(void)
 {
-    C2D_TargetClear(g_bot, COL_BG);
-    C2D_SceneBegin(g_bot);
+    ui_screen_begin(g_bot, BOT_W);
     if (g_vid_tab == 1) draw_comment_list(VTAB_H, com_view_h());
     else draw_video_panel();
     draw_video_tabs();
@@ -2519,17 +2779,23 @@ static void draw_video_bottom(void)
 
 static void draw_settings_top(void)
 {
-    C2D_TargetClear(g_top, COL_BG);
-    C2D_SceneBegin(g_top);
+    ui_screen_begin(g_top, TOP_W);
     float off = -g_set_scroll;
     char val[96];
 
-    for (int i = 0; i < SET_COUNT; i++) {
-        float y = HEAD_H + 6 + i * (SET_ROW_H + 4) + off;
+    for (int k = 0; k < NORDER; k++) {
+        int i = SET_ORDER[k];
+        float y = set_item_y(k) + off;
         if (y > SCR_H || y + SET_ROW_H < HEAD_H) continue;
+        if (i < 0) { /* en-tête de section */
+            float ty = y + SEC_H - 6 - ui_line_height(0.44f);
+            ui_text(CARD_X + 4, ty, 0.44f, COL_ACCENT2, sec_name(i));
+            float tw = ui_text_width(sec_name(i), 0.44f);
+            C2D_DrawRectSolid(CARD_X + 10 + tw, ty + ui_line_height(0.44f) / 2, 0.5f, CARD_W - 14 - tw, 1, COL_LINE);
+            continue;
+        }
         bool sel = (i == g_set_sel);
-        if (sel) ui_rrect(CARD_X - 2, y - 2, CARD_W + 4, SET_ROW_H + 4, 11, COL_ACCENT);
-        ui_rrect(CARD_X, y, CARD_W, SET_ROW_H, 9, sel ? COL_CARD_HI : COL_CARD);
+        ui_card(CARD_X, y, CARD_W, SET_ROW_H, 9, sel);
         float ty = y + (SET_ROW_H - ui_line_height(0.5f)) / 2;
         ui_text(CARD_X + 12, ty, 0.5f, COL_TEXT, set_label(i));
 
@@ -2552,8 +2818,8 @@ static void draw_settings_top(void)
         ui_text(vx, vy, 0.46f, sel ? COL_WHITE : COL_ACCENT2, val);
     }
 
-    float total = HEAD_H + 6 + SET_COUNT * (SET_ROW_H + 4) + 40;
-    float fy = HEAD_H + 6 + SET_COUNT * (SET_ROW_H + 4) + 6 + off;
+    float total = set_total_h();
+    float fy = set_item_y(NORDER) + 6 + off;
     ui_text_center(TOP_W / 2, fy, 0.38f, COL_DIM, "Reddit3DS v" APP_VERSION " · build " BUILD_STAMP "  ·  sdmc:/3ds/reddit3ds/config.ini");
     draw_scrollbar(TOP_W - 4, HEAD_H + 2, SCR_H - HEAD_H - 4, total, g_set_scroll);
     draw_header(TOP_W, TR("Paramètres", "Settings"), NULL, false);
@@ -2562,8 +2828,7 @@ static void draw_settings_top(void)
 
 static void draw_settings_bottom(void)
 {
-    C2D_TargetClear(g_bot, COL_BG);
-    C2D_SceneBegin(g_bot);
+    ui_screen_begin(g_bot, BOT_W);
 
     if (g_set_help_for != g_set_sel) {
         g_set_help_for = g_set_sel;
@@ -2573,6 +2838,10 @@ static void draw_settings_bottom(void)
     char val[96];
     set_value(g_set_sel, val, sizeof(val));
     ui_text(14, 12, 0.55f, COL_WHITE, set_label(g_set_sel));
+    {
+        const char *sn = sec_name(set_section(g_set_sel));
+        ui_text(BOT_W - 14 - ui_text_width(sn, 0.4f), 15, 0.4f, COL_DIM, sn);
+    }
     if (g_set_sel != SET_CLEAR && g_set_sel != SET_STATUS) ui_text(14, 34, 0.48f, COL_ACCENT2, val);
     ui_rrect(8, 58, BOT_W - 16, TOOL_Y - 64, 9, COL_CARD);
     doc_draw(&g_set_help, 16, 66, BOT_W - 32, TOOL_Y - 76, 0, -1);
@@ -2626,8 +2895,7 @@ static int srv_testing_index(void)
 
 static void draw_servers_top(void)
 {
-    C2D_TargetClear(g_top, COL_BG);
-    C2D_SceneBegin(g_top);
+    ui_screen_begin(g_top, TOP_W);
     float off = -g_srv_scroll;
     int pref = srv_pref_index(), testing = srv_testing_index();
     char buf[96];
@@ -2637,8 +2905,7 @@ static void draw_servers_top(void)
         float y = HEAD_H + 6 + i * (SRV_ROW_H + 4) + off;
         if (y > SCR_H || y + SRV_ROW_H < HEAD_H) continue;
         bool sel = (i == g_srv_sel);
-        if (sel) ui_rrect(CARD_X - 2, y - 2, CARD_W + 4, SRV_ROW_H + 4, 11, COL_ACCENT);
-        ui_rrect(CARD_X, y, CARD_W, SRV_ROW_H, 9, sel ? COL_CARD_HI : COL_CARD);
+        ui_card(CARD_X, y, CARD_W, SRV_ROW_H, 9, sel);
         float cy = y + SRV_ROW_H / 2;
         if (i == testing && s->state == INST_UNTESTED) ui_spinner(CARD_X + 16, cy, 6, COL_ACCENT);
         else C2D_DrawCircleSolid(CARD_X + 16, cy, 0.5f, 6, srv_color(s->state));
@@ -2647,7 +2914,7 @@ static void draw_servers_top(void)
         ui_text(tx, cy - ui_line_height(0.48f) / 2, 0.48f, COL_TEXT, s->host);
         if (i == pref) {
             float hw = ui_text_width(s->host, 0.48f);
-            ui_pill(tx + hw + 6, cy - ui_line_height(0.36f) / 2 - 1, TR("choisi", "chosen"), 0.36f, COL_ACCENT, COL_WHITE);
+            ui_pill(tx + hw + 6, cy - ui_line_height(0.36f) / 2 - 1, TR("choisi", "chosen"), 0.36f, COL_ACCENT, COL_ONACC);
         }
         if (s->state == INST_OK) snprintf(buf, sizeof(buf), "%d ms", s->ms);
         else if (i == testing && s->state == INST_UNTESTED) snprintf(buf, sizeof(buf), "%s", TR("test...", "testing..."));
@@ -2674,8 +2941,7 @@ static void draw_servers_top(void)
 
 static void draw_servers_bottom(void)
 {
-    C2D_TargetClear(g_bot, COL_BG);
-    C2D_SceneBegin(g_bot);
+    ui_screen_begin(g_bot, BOT_W);
     char line[160];
     ui_rrect(8, 8, BOT_W - 16, TOOL_Y - 14, 9, COL_CARD);
     if (g_srv_sel >= 0 && g_srv_sel < g_nsrv) {
@@ -2731,6 +2997,9 @@ static void input_feed(u32 down, u32 rep)
     if (g_sel < 0) { /* rangée des suggestions */
         if (rep & KEY_RIGHT) chip_move(+1);
         if (rep & KEY_LEFT) chip_move(-1);
+    } else if (g_cfg.lr_mode == LR_PAGE) { /* L / R défilent, la croix change le tri */
+        if (down & KEY_RIGHT) g_act = ACT_SORT_NEXT;
+        if (down & KEY_LEFT) g_act = ACT_SORT_PREV;
     } else {
         if (rep & KEY_RIGHT) feed_move(+4);
         if (rep & KEY_LEFT) feed_move(-4);
@@ -2740,8 +3009,13 @@ static void input_feed(u32 down, u32 rep)
     if (down & KEY_X) g_act = ACT_REFRESH;
     if (down & KEY_Y) g_act = ACT_SEARCH;
     if (down & KEY_SELECT) g_act = ACT_SETTINGS;
-    if (down & (KEY_R | KEY_ZR)) g_act = ACT_SORT_NEXT;
-    if (down & (KEY_L | KEY_ZL)) g_act = ACT_SORT_PREV;
+    if (g_cfg.lr_mode == LR_PAGE) {
+        if (rep & (KEY_R | KEY_ZR)) feed_move(+4);
+        if (rep & (KEY_L | KEY_ZL)) feed_move(-4);
+    } else {
+        if (down & (KEY_R | KEY_ZR)) g_act = ACT_SORT_NEXT;
+        if (down & (KEY_L | KEY_ZL)) g_act = ACT_SORT_PREV;
+    }
 
     /* défilement infini */
     if (g_feed.after[0] && g_feed.n > 0 && g_sel >= g_feed.n - 3 && !job_busy() && !g_has_pending &&
@@ -2753,10 +3027,12 @@ static void input_feed(u32 down, u32 rep)
  * dans la zone (0, vy) - (BOT_W, vy + vh). */
 static void input_comments(u32 rep, float vy, float vh)
 {
+    int sel_before = g_com_sel;
     if (rep & KEY_DOWN) doc_step(&g_com, +1, vh, &g_com_sel, &g_com_to);
     if (rep & KEY_UP) doc_step(&g_com, -1, vh, &g_com_sel, &g_com_to);
     if (rep & KEY_RIGHT) for (int i = 0; i < 4; i++) doc_step(&g_com, +1, vh, &g_com_sel, &g_com_to);
     if (rep & KEY_LEFT) for (int i = 0; i < 4; i++) doc_step(&g_com, -1, vh, &g_com_sel, &g_com_to);
+    if (g_com_sel != sel_before) sfx_play(SFX_NAV);
 
     /* glisser du doigt sur les commentaires, avec inertie */
     if (ui_touch_held() && ui_touch_y() >= vy && ui_touch_y() < vy + vh) {
@@ -2827,6 +3103,7 @@ static void input_search(u32 down, u32 rep)
         if (g_s_sel < 0) g_s_sel = 0;
         if (g_s_sel >= g_nscards) g_s_sel = g_nscards - 1;
         search_ensure_visible();
+        sfx_play(SFX_NAV);
     }
     /* clavier tactile : la touche réagit dès que le doigt se pose */
     if (ui_touch_down()) {
@@ -2853,7 +3130,7 @@ static void input_video(u32 down, u32 rep, u32 held, const circlePosition *cp)
 {
     if (down & KEY_A) g_act = ACT_VIDEO_PLAY;
     if (down & KEY_B) g_act = ACT_BACK;
-    if (down & KEY_Y) g_vid_tab = !g_vid_tab; /* contrôles <-> commentaires */
+    if (down & KEY_Y) { g_vid_tab = !g_vid_tab; sfx_play(SFX_TAB); } /* contrôles <-> commentaires */
 
     /* zoom et déplacement, comme dans la visionneuse d'images */
     if (held & (KEY_R | KEY_ZR)) viewer_zoom(1.03f);
@@ -2895,8 +3172,8 @@ static void input_video(u32 down, u32 rep, u32 held, const circlePosition *cp)
 
 static void input_settings(u32 down, u32 rep)
 {
-    if (rep & KEY_DOWN) { g_set_sel = (g_set_sel + 1) % SET_COUNT; set_ensure_visible(); }
-    if (rep & KEY_UP) { g_set_sel = (g_set_sel + SET_COUNT - 1) % SET_COUNT; set_ensure_visible(); }
+    if (rep & KEY_DOWN) { set_step(+1); set_ensure_visible(); }
+    if (rep & KEY_UP) { set_step(-1); set_ensure_visible(); }
     if (rep & KEY_LEFT) g_act = ACT_SET_PREV;
     if (rep & KEY_RIGHT) g_act = ACT_SET_NEXT;
     if (down & KEY_A) g_act = ACT_SET_ACTIVATE;
@@ -2907,6 +3184,7 @@ static void input_servers(u32 down, u32 rep)
 {
     if (g_nsrv > 0 && (rep & (KEY_DOWN | KEY_UP))) {
         g_srv_sel = (g_srv_sel + ((rep & KEY_DOWN) ? 1 : g_nsrv - 1)) % g_nsrv;
+        sfx_play(SFX_NAV);
         srv_ensure_visible();
     }
     /* toucher une ligne de l'écran du haut n'est pas possible : le choix se fait à la croix */
@@ -2914,6 +3192,56 @@ static void input_servers(u32 down, u32 rep)
     if (down & KEY_Y) g_act = ACT_SRV_AUTO;
     if ((down & KEY_X) && !loading(JOB_STATUS, -1)) g_act = ACT_SRV_TEST;
     if (down & (KEY_B | KEY_SELECT)) g_act = ACT_BACK;
+}
+
+/* A<->B (et X<->Y) selon le réglage « Boutons » */
+static u32 swap_bits(u32 k, u32 a, u32 b)
+{
+    u32 ka = k & a, kb = k & b;
+    k &= ~(a | b);
+    return k | (ka ? b : 0) | (kb ? a : 0);
+}
+
+static u32 swap_keys(u32 k)
+{
+    k = swap_bits(k, KEY_A, KEY_B);
+    if (g_cfg.buttons == BTN_SWAP_ABXY) k = swap_bits(k, KEY_X, KEY_Y);
+    return k;
+}
+
+/* Curseur 3D : appliqué quand il bouge (les boutons gardent la main le reste du temps) */
+static void slider_update(void)
+{
+    static float last = -1;
+    static int still;
+    float s = osGet3DSliderState();
+    if (last < 0) { last = s; return; }
+    bool moved = fabsf(s - last) > 0.015f;
+    if (moved) { last = s; still = 0; } else if (still < 1000) still++;
+    switch (g_cfg.slider) {
+    case S3D_ZOOM:
+        if (moved && (g_screen == SCR_IMAGE || g_screen == SCR_VIDEO)) {
+            float z = 1 + s * 7;
+            float k = z / g_zoom;
+            g_zoom = z;
+            g_pan_x *= k;
+            g_pan_y *= k;
+        }
+        break;
+    case S3D_VOLUME:
+        if (moved && g_screen == SCR_VIDEO) video_set_volume(s);
+        break;
+    case S3D_TEXT:
+        /* on attend que le curseur s'arrête : refaire la mise en page à chaque cran serait lent */
+        if (still == 8 && fabsf(1 + s * 0.5f - g_slider_text) > 0.02f) {
+            g_slider_text = 1 + s * 0.5f;
+            apply_text_scale();
+            rebuild_all();
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -2934,7 +3262,9 @@ int main(void)
     hidSetRepeatParameters(16, 4);
 
     settings_load();
-    ui_set_text_scale(TEXT_SCALES[g_cfg.text_size]);
+    audio_init(); /* sons et musique (romfs + carte SD) */
+    apply_look();
+    apply_text_scale();
     g_sort = g_cfg.default_sort;
     snprintf(g_sub, sizeof(g_sub), "%s", g_cfg.start_sub);
     sanitize_sub(g_sub);
@@ -2962,6 +3292,12 @@ int main(void)
     while (aptMainLoop()) {
         hidScanInput();
         u32 down = hidKeysDown(), held = hidKeysHeld(), rep = hidKeysDownRepeat();
+        if (g_cfg.buttons != BTN_STD) { /* boutons inversés : tout le reste du code voit la touche logique */
+            down = swap_keys(down);
+            held = swap_keys(held);
+            rep = swap_keys(rep);
+        }
+        slider_update();
         circlePosition cp;
         hidCircleRead(&cp);
         ui_touch_update();
@@ -3018,6 +3354,7 @@ int main(void)
         job_exit();
         img_exit();
     }
+    audio_exit(); /* après la vidéo : ndspExit */
     free_cards();
     free_scards();
     doc_free(&g_info);

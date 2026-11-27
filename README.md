@@ -5,6 +5,8 @@ A read-only Reddit client for the Nintendo 3DS (homebrew, CFW required), distrib
 
 - Modern interface: rounded cards, thumbnails, smooth scrolling, loading animations,
   notifications, and a touch action bar
+- **Themes** (including a 3DS HOME Menu style), adjustable feed layout, swappable buttons, and a
+  configurable **3D slider** (zoom, volume or text size)
 - **Images**: thumbnails in the feed, preview on the bottom screen, images in posts, and a
   **zoomable full-screen viewer** (JPEG and PNG; previews for videos and galleries)
 - **Subreddit search** with icons, member counts, and descriptions
@@ -96,6 +98,8 @@ The active data source is displayed at the bottom of the lower screen.
 
 ## Settings (SELECT)
 
+Settings are grouped into sections: Display, Content, Video, Controls, Network and data.
+
 | Setting | Options |
 |---|---|
 | Interface language | French, English (default: console language) |
@@ -107,6 +111,15 @@ The active data source is displayed at the bottom of the lower screen.
 | NSFW content | Hide (removed from the feed), Blur (image hidden until A is pressed), Show |
 | Images | All, Lightweight (small previews only), None (save data) |
 | Text size | Small, Normal, Large |
+| Theme | Changes colours **and** look (corners, borders, shadows, selection, bars, buttons, background): Standard (dark, light, black, midnight blue), 3DS HOME Menu in the console colours (cobalt blue, flame red, aqua blue, coral pink, midnight purple, lime green, ice white, cosmos black — striped background, glowing selection, glossy bars, raised buttons), 3DS System Settings (dotted background, bordered lists), Aero and Aero night (Windows Vista / 7 style: gradient sky background with light streaks, glass bars, blue gradient selection, glassy buttons), Retro Game Boy and Retro terminal (square corners, boxed cards, blinking selection frame, CRT scanlines) |
+| Feed layout | Normal, Compact (small thumbnails, 2-line titles), Large ; thumbnails on the right or on the left |
+| Buttons | Standard, A / B swapped, A/B and X/Y swapped (the button icons shown follow) |
+| L / R in the feed | Change sort (default), or scroll 4 posts (the D-pad left / right then changes the sort) |
+| 3D slider | Off, Zoom (images and videos), Video volume, Text size (bottom = your size, top = up to 50 % larger) |
+| Interface sounds | On / Off (needs `sdmc:/3ds/dspfirm.cdc`) |
+| Sound pack | Default (Kenney, CC0) or a pack from `sdmc:/3ds/reddit3ds/sons/` |
+| Background music | Off, Default (calm « Heavenly Loop », CC0), Shuffle, or a track from `sdmc:/3ds/reddit3ds/musique/` (paused during videos) |
+| Music volume | 25 to 100 % |
 | Translate to | French, English, Spanish, German, Italian, Portuguese (Google Translate, with MyMemory as a fallback) |
 | Maximum video quality | Auto (360p on New 3DS, 270p on Old 3DS), 220p, 270p, 360p |
 | Video playback | Direct (streaming, starts quickly) or Preload (the video and audio are fully downloaded to the SD card first, then played without interruptions) |
@@ -119,6 +132,26 @@ Reddit does not translate posts: **Content language** selects subreddits written
 Settings are saved to `sdmc:/3ds/reddit3ds/config.ini`. You can also edit the Redlib instance
 list (`redlib=`) there (`redlib_server=` holds the chosen server) and add a `client_id`.
 
+## Sounds and music
+
+On first launch the app creates, on the SD card:
+
+```text
+sdmc:/3ds/reddit3ds/sons/LISEZMOI.txt        how to make a sound pack
+sdmc:/3ds/reddit3ds/sons/_modele/            template (ignored): one folder per sound
+    navigation/ valider/ retour/ ouvrir/ changer/ onglet/ erreur/ notification/ touche/
+sdmc:/3ds/reddit3ds/musique/LISEZMOI.txt     where to put your music
+```
+
+Copy `_modele` to a new folder (e.g. `sons/my_pack/`), drop one audio file in each sound folder
+(several files = one picked at random, up to 4; `sons/my_pack/valider.ogg` also works), then pick
+the pack in **Settings > Sound**. Missing sounds fall back to the default ones. Music goes in
+`musique/`. Formats: `.ogg`, `.mp3`, `.wav`, `.m4a`.
+
+Default sounds: [Interface Sounds](https://kenney.nl/assets/interface-sounds) by Kenney (CC0).
+Default music: [Heavenly Loop](https://opengameart.org/content/heavenly-loop) by isaiah658 (CC0).
+See `romfs/CREDITS_AUDIO.txt`.
+
 ## Architecture
 
 ```text
@@ -128,6 +161,7 @@ source/
   image.c/h background JPEG/PNG downloading and decoding, texture cache
   job.c/h   Reddit requests in a worker thread (cancellable)
   video.c/h v.redd.it player (FFmpeg + NDSP), seeking
+  audio.c/h interface sounds and background music (FFmpeg: OGG, MP3, WAV, M4A ; NDSP)
   translate.c/h translation (Google, MyMemory)
   settings.c/h settings (`config.ini`) and FR/EN translations
   reddit.c/h data sources (Redlib, Arctic Shift, optional OAuth), Post/Comment model

@@ -1,0 +1,14 @@
+Sons et musique par défaut de Red3D (domaine public, CC0)
+
+Sons de l'interface (romfs/sons/defaut/) :
+  « Interface Sounds » 1.0 par Kenney (www.kenney.nl), licence CC0
+  https://kenney.nl/assets/interface-sounds  —  https://opengameart.org/content/interface-sounds
+  navigation = tick_002, valider = select_002, retour = back_002, ouvrir = open_002,
+  changer = switch_002, onglet = click_002, erreur = error_004, notification = confirmation_002,
+  touche = tick_001
+
+Musique (romfs/musique/heavenly_loop.ogg) :
+  « Heavenly Loop » par isaiah658, licence CC0
+  https://opengameart.org/content/heavenly-loop
+
+CC0 : http://creativecommons.org/publicdomain/zero/1.0/ (aucune attribution obligatoire, crédit donné par courtoisie)

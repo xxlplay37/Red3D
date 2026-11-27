@@ -15,6 +15,10 @@ enum { VM_DIRECT, VM_PRELOAD, VIDEO_MODES };
 enum { IQ_NORMAL, IQ_HIGH, IQ_MAX, IMG_QUALITIES };   /* qualité des images */
 enum { HOME_SUGGEST, HOME_SUBS, HOME_BOTH, HOME_MODES };   /* contenu du fil d'accueil */
 enum { SUG_LANG, SUG_GAMING, SUG_NINTENDO, SUG_TECH, SUG_SCIENCE, SUG_NEWS, SUG_FUN, SUG_OFF, SUG_THEMES };
+enum { DENS_NORMAL, DENS_COMPACT, DENS_LARGE, DENSITIES };    /* disposition du fil */
+enum { BTN_STD, BTN_SWAP_AB, BTN_SWAP_ABXY, BTN_LAYOUTS }; /* boutons inversés */
+enum { LR_SORT, LR_PAGE, LR_MODES };                      /* L / R dans le fil */
+enum { S3D_OFF, S3D_ZOOM, S3D_VOLUME, S3D_TEXT, S3D_MODES }; /* curseur 3D */
 #define MAX_SUBS 40                                    /* abonnements locaux */
 #define NSUGGEST 8                                     /* suggestions par thème */
 #define COM_BATCHES 5                                  /* 4, 8, 12, 20, tous */   /* lecture en flux / après chargement complet */
@@ -36,6 +40,16 @@ typedef struct {
     char recent[700];   /* subreddits récents, séparés par des virgules */
     int home_mode;      /* HOME_* : suggestions, abonnements ou les deux */
     int sug_theme;      /* SUG_* : thème des suggestions (accueil, onglet Subs) */
+    int theme;          /* TH_* (ui.h) */
+    int density;        /* DENS_* : taille des cartes et des miniatures */
+    int thumb_left;     /* miniature à gauche des cartes */
+    int buttons;        /* BTN_* : A/B (et X/Y) inversés */
+    int lr_mode;        /* LR_* : L/R = tri ou page */
+    int slider;         /* S3D_* : fonction du curseur 3D */
+    int sfx;            /* sons de l'interface activés */
+    char sfx_pack[48];  /* pack de sons (dossier de sdmc:/3ds/reddit3ds/sons), "" = par défaut */
+    char music[96];     /* "off", "" (par défaut), "*" (au hasard) ou un fichier du dossier musique */
+    int music_vol;      /* 0..3 : 25, 50, 75, 100 % */
     char subs[1200];    /* abonnements locaux, séparés par des virgules */
     /* conservés tels quels (édition manuelle du fichier) */
     char client_id[64];

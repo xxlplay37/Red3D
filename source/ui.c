@@ -156,6 +156,7 @@ static void emoji_draw(int idx, float x, float y, float scale)
 
 void ui_init(void)
 {
+    ui_set_theme(TH_DARK);
     fontEnsureMapped();
     s_buf = C2D_TextBufNew(16384);
     FINF_s *info = C2D_FontGetInfo(NULL);
@@ -203,9 +204,13 @@ static void draw_run(const char *run, float x, float y, float scale, u32 color)
     C2D_DrawText(&t, C2D_WithColor, x, y, 0.5f, scale, scale, color);
 }
 
+static const char *swap_glyphs(const char *s, char *tmp, size_t n);
+
 void ui_text(float x, float y, float scale, u32 color, const char *s)
 {
     if (!s || !*s) return;
+    char swapped[512];
+    s = swap_glyphs(s, swapped, sizeof(swapped));
     scale *= s_mul;
     if (!text_has_special(s)) {
         draw_run(s, x, y, scale, color);
@@ -426,7 +431,12 @@ void doc_step(const Doc *d, int dir, float vh, int *sel, float *scroll)
 /* ------------------------------------------------------------------ */
 /* Formes et widgets                                                  */
 
-void ui_rrect(float x, float y, float w, float h, float r, u32 c)
+static inline u32 with_alpha(u32 c, u8 a)
+{
+    return (c & 0x00FFFFFFu) | ((u32)a << 24);
+}
+
+static void rrect_raw(float x, float y, float w, float h, float r, u32 c)
 {
     if (w <= 0 || h <= 0) return;
     if (r * 2 > h) r = h / 2;
@@ -439,6 +449,17 @@ void ui_rrect(float x, float y, float w, float h, float r, u32 c)
     C2D_DrawCircleSolid(x + w - r, y + r, 0.5f, r, c);
     C2D_DrawCircleSolid(x + r, y + h - r, 0.5f, r, c);
     C2D_DrawCircleSolid(x + w - r, y + h - r, 0.5f, r, c);
+}
+
+/* Rectangle arrondi selon le thème ; les panneaux (couleur des cartes) reçoivent le contour du thème */
+void ui_rrect(float x, float y, float w, float h, float r, u32 c)
+{
+    r *= g_th.radius;
+    if (g_th.border_w && c == g_th.card && w > 30 && h > 20) {
+        float b = g_th.border_w;
+        rrect_raw(x - b, y - b, w + 2 * b, h + 2 * b, r > 0 ? r + b : 0, g_th.border);
+    }
+    rrect_raw(x, y, w, h, r, c);
 }
 
 void ui_rrect_outline(float x, float y, float w, float h, float r, float t, u32 color, u32 inner)
@@ -500,7 +521,7 @@ void ui_logo(float cx, float cy, float r)
 {
     C2D_DrawCircleSolid(cx, cy, 0.5f, r, COL_ACCENT);
     /* visage */
-    C2D_DrawEllipseSolid(cx - r * 0.62f, cy - r * 0.30f, 0.5f, r * 1.24f, r * 0.84f, COL_WHITE);
+    C2D_DrawEllipseSolid(cx - r * 0.62f, cy - r * 0.30f, 0.5f, r * 1.24f, r * 0.84f, COL_ONACC);
     C2D_DrawCircleSolid(cx - r * 0.25f, cy + r * 0.05f, 0.5f, r * 0.13f, COL_ACCENT);
     C2D_DrawCircleSolid(cx + r * 0.25f, cy + r * 0.05f, 0.5f, r * 0.13f, COL_ACCENT);
 }
@@ -553,12 +574,41 @@ bool ui_button(float x, float y, float w, float h, const char *label, bool prima
     bool pressed = enabled && s_t_held && inside && !s_t_moved;
     u32 bg = !enabled ? COL_CARD : primary ? (pressed ? COL_ACCENT2 : COL_ACCENT)
                                            : (pressed ? COL_LINE : COL_CARD_HI);
-    ui_rrect(x, y, w, h, h / 2, bg);
+    switch (g_th.sel) {
+    case SEL_GLOW: { /* 3DS : bouton en relief (contour, reflet en haut, ombre en bas) */
+        float r = 7 * g_th.radius;
+        rrect_raw(x, y + 1, w, h, r, C2D_Color32(0, 0, 0, 0x30));
+        rrect_raw(x, y, w, h, r, primary && enabled ? COL_ACCENT2 : g_th.border);
+        rrect_raw(x + 1, y + 1, w - 2, h - 2, r > 1 ? r - 1 : 0, bg == COL_CARD_HI ? COL_CARD : bg);
+        if (!pressed) C2D_DrawRectSolid(x + 3, y + 2, 0.5f, w - 6, h / 2 - 2, C2D_Color32(0xFF, 0xFF, 0xFF, 0x38));
+        break;
+    }
+    case SEL_AERO: { /* Aero : bouton vitré (contour sombre, moitié haute claire, reflet) */
+        float r = 4;
+        u32 top = primary && enabled ? (pressed ? COL_ACCENT2 : COL_ACCENT) : (pressed ? COL_CARD_HI : COL_CARD);
+        rrect_raw(x, y, w, h, r, enabled ? (primary ? COL_ACCENT2 : g_th.border) : COL_LINE);
+        rrect_raw(x + 1, y + 1, w - 2, h - 2, r - 1, top);
+        C2D_DrawRectangle(x + 2, y + h / 2, 0.5f, w - 4, h / 2 - 2, with_alpha(0, 0x00), with_alpha(0, 0x00),
+                          with_alpha(0, 0x22), with_alpha(0, 0x22));
+        if (!pressed) C2D_DrawRectSolid(x + 2, y + 2, 0.5f, w - 4, h / 2 - 2, with_alpha(0xFFFFFFFFu, 0x60));
+        break;
+    }
+    case SEL_BOX: { /* rétro : case carrée à contour épais, couleurs inversées quand on appuie */
+        float b = g_th.border_w ? g_th.border_w : 1;
+        C2D_DrawRectSolid(x, y, 0.5f, w, h, enabled ? (primary ? COL_ACCENT : g_th.border) : COL_LINE);
+        C2D_DrawRectSolid(x + b, y + b, 0.5f, w - 2 * b, h - 2 * b,
+                          pressed ? COL_ACCENT : primary && enabled ? COL_ACCENT : COL_CARD);
+        break;
+    }
+    default:
+        rrect_raw(x, y, w, h, h / 2, bg);
+        break;
+    }
     float sc = 0.45f;
     float tw = ui_text_width(label, sc);
     if (tw > w - 8) { sc = 0.4f; tw = ui_text_width(label, sc); }
     ui_text(x + (w - tw) / 2, y + (h - ui_line_height(sc)) / 2, sc,
-            enabled ? COL_WHITE : COL_DIM, label);
+            !enabled ? COL_DIM : (primary || (pressed && g_th.sel == SEL_BOX)) ? COL_ONACC : COL_WHITE, label);
     return enabled && s_t_tap && inside;
 }
 
@@ -584,8 +634,8 @@ void ui_draw_toast(float sw)
     float w = tw + 24, h = ui_line_height(sc) + 10;
     float x = (sw - w) / 2, y = 240 - h - 10;
     if (s_toast_t < 15) y += (15 - s_toast_t) * 3; /* glisse vers le bas en disparaissant */
-    ui_rrect(x, y, w, h, h / 2, C2D_Color32(0x33, 0x35, 0x3B, 0xFF));
-    ui_text(x + 12, y + 5, sc, COL_WHITE, s_toast);
+    ui_rrect(x, y, w, h, h / 2, g_th.toast);
+    ui_text(x + 12, y + 5, sc, COL_OVERLAY, s_toast);
 }
 
 /* ------------------------------------------------------------------ */
@@ -611,4 +661,286 @@ void doc_truncate(Doc *d, int max_lines)
     free(l->text);
     l->text = t;
     d->h = l->y + ui_line_height(l->scale);
+}
+
+/* ------------------------------------------------------------------ */
+/* Thèmes : couleurs + aspect                                         */
+
+#define RGB(r, g, b) ((u32)(r) | ((u32)(g) << 8) | ((u32)(b) << 16) | 0xFF000000u) /* = C2D_Color32, mais constant */
+#define WHITE RGB(0xFF, 0xFF, 0xFF)
+
+/* Aspect « standard » : coins arrondis, pas de contour, sélection par anneau, barres unies */
+#define STD_LOOK .radius = 1.0f, .border_w = 0, .shadow = 0, .sel = SEL_RING, .bar_style = BAR_FLAT, .bg_style = BG_PLAIN
+
+static const Theme THEMES_TAB[THEMES] = {
+    [TH_DARK] = { .bg = RGB(0x0F, 0x10, 0x12), .bar = RGB(0x17, 0x18, 0x1B), .card = RGB(0x1C, 0x1D, 0x21),
+                  .card_hi = RGB(0x26, 0x28, 0x2E), .line = RGB(0x2C, 0x2E, 0x34), .text = RGB(0xE6, 0xE8, 0xEB),
+                  .strong = WHITE, .dim = RGB(0x8E, 0x93, 0x9A), .accent = RGB(0xFF, 0x45, 0x00),
+                  .accent2 = RGB(0xFF, 0x7A, 0x3D), .link = RGB(0x4F, 0xBC, 0xFF), .green = RGB(0x46, 0xD1, 0x60),
+                  .red = RGB(0xFF, 0x58, 0x5B), .yellow = RGB(0xFF, 0xD6, 0x35), .toast = RGB(0x33, 0x35, 0x3B),
+                  .onacc = WHITE, .border = RGB(0x2C, 0x2E, 0x34), .bar2 = RGB(0x17, 0x18, 0x1B), STD_LOOK },
+    [TH_LIGHT] = { .bg = RGB(0xEE, 0xF0, 0xF3), .bar = WHITE, .card = WHITE, .card_hi = RGB(0xE4, 0xEA, 0xF2),
+                   .line = RGB(0xD3, 0xD7, 0xDD), .text = RGB(0x24, 0x28, 0x2E), .strong = RGB(0x0B, 0x0C, 0x0E),
+                   .dim = RGB(0x6A, 0x71, 0x7A), .accent = RGB(0xFF, 0x45, 0x00), .accent2 = RGB(0xD9, 0x48, 0x0F),
+                   .link = RGB(0x0A, 0x66, 0xC2), .green = RGB(0x1F, 0x9D, 0x3A), .red = RGB(0xD9, 0x30, 0x35),
+                   .yellow = RGB(0x9A, 0x6E, 0x00), .toast = RGB(0x30, 0x33, 0x38), .onacc = WHITE,
+                   .border = RGB(0xD3, 0xD7, 0xDD), .bar2 = WHITE, STD_LOOK },
+    [TH_BLACK] = { .bg = RGB(0x00, 0x00, 0x00), .bar = RGB(0x0A, 0x0A, 0x0A), .card = RGB(0x11, 0x11, 0x11),
+                   .card_hi = RGB(0x1E, 0x1E, 0x1E), .line = RGB(0x26, 0x26, 0x26), .text = RGB(0xE6, 0xE6, 0xE6),
+                   .strong = WHITE, .dim = RGB(0x8A, 0x8A, 0x8A), .accent = RGB(0xFF, 0x45, 0x00),
+                   .accent2 = RGB(0xFF, 0x7A, 0x3D), .link = RGB(0x4F, 0xBC, 0xFF), .green = RGB(0x46, 0xD1, 0x60),
+                   .red = RGB(0xFF, 0x58, 0x5B), .yellow = RGB(0xFF, 0xD6, 0x35), .toast = RGB(0x2A, 0x2A, 0x2A),
+                   .onacc = WHITE, .border = RGB(0x26, 0x26, 0x26), .bar2 = RGB(0x0A, 0x0A, 0x0A), STD_LOOK },
+    [TH_NAVY] = { .bg = RGB(0x0D, 0x14, 0x21), .bar = RGB(0x13, 0x1C, 0x2E), .card = RGB(0x17, 0x22, 0x38),
+                  .card_hi = RGB(0x21, 0x30, 0x50), .line = RGB(0x2A, 0x3A, 0x5C), .text = RGB(0xDC, 0xE6, 0xF5),
+                  .strong = WHITE, .dim = RGB(0x87, 0x96, 0xB0), .accent = RGB(0x4F, 0x8C, 0xFF),
+                  .accent2 = RGB(0x7F, 0xB0, 0xFF), .link = RGB(0x6C, 0xC7, 0xFF), .green = RGB(0x46, 0xD1, 0x60),
+                  .red = RGB(0xFF, 0x58, 0x5B), .yellow = RGB(0xFF, 0xD6, 0x35), .toast = RGB(0x2A, 0x36, 0x52),
+                  .onacc = WHITE, .border = RGB(0x2A, 0x3A, 0x5C), .bar2 = RGB(0x13, 0x1C, 0x2E), STD_LOOK },
+    /* Menu HOME de la 3DS : fond gris rayé, panneaux blancs bordés avec ombre, halo autour de la
+     * sélection, barres brillantes en dégradé, boutons en relief. Une variante par couleur de console :
+     * accent, accent foncé, fond de la sélection. */
+#define HOME_LOOK(acc, acc2, sel_bg)                                                                           \
+    { .bg = RGB(0xE2, 0xE2, 0xE2), .pattern = RGB(0xD7, 0xD7, 0xD7), .bar = WHITE, .bar2 = RGB(0xDC, 0xDC, 0xDC), \
+      .card = WHITE, .card_hi = sel_bg, .line = RGB(0xC4, 0xC4, 0xC4), .text = RGB(0x3C, 0x3C, 0x3C),            \
+      .strong = RGB(0x1E, 0x1E, 0x1E), .dim = RGB(0x7C, 0x7C, 0x7C), .accent = acc, .accent2 = acc2,             \
+      .link = RGB(0x16, 0x78, 0xC8), .green = RGB(0x36, 0xA8, 0x32), .red = RGB(0xC8, 0x2A, 0x24),               \
+      .yellow = RGB(0x9A, 0x6E, 0x00), .toast = RGB(0x46, 0x46, 0x46), .onacc = WHITE,                           \
+      .border = RGB(0xC0, 0xC0, 0xC0), .radius = 0.75f, .border_w = 1, .shadow = 2,                             \
+      .sel = SEL_GLOW, .bar_style = BAR_GLOSS, .bg_style = BG_STRIPES }
+    [TH_3DS]        = HOME_LOOK(RGB(0x12, 0x8A, 0xD0), RGB(0x0E, 0x70, 0xB4), RGB(0xDD, 0xF3, 0xFE)), /* bleu cobalt */
+    [TH_3DS_RED]    = HOME_LOOK(RGB(0xD0, 0x1F, 0x2E), RGB(0xA8, 0x14, 0x22), RGB(0xFC, 0xE4, 0xE4)), /* rouge flamme */
+    [TH_3DS_AQUA]   = HOME_LOOK(RGB(0x00, 0x8C, 0xA8), RGB(0x00, 0x70, 0x88), RGB(0xD6, 0xF4, 0xF8)), /* bleu aqua */
+    [TH_3DS_PINK]   = HOME_LOOK(RGB(0xD0, 0x3C, 0x7E), RGB(0xA8, 0x2C, 0x64), RGB(0xFC, 0xE4, 0xEF)), /* rose corail */
+    [TH_3DS_PURPLE] = HOME_LOOK(RGB(0x6E, 0x40, 0xAA), RGB(0x56, 0x30, 0x88), RGB(0xEC, 0xE2, 0xF8)), /* violet minuit */
+    [TH_3DS_GREEN]  = HOME_LOOK(RGB(0x2E, 0x8A, 0x2A), RGB(0x22, 0x6E, 0x20), RGB(0xE0, 0xF4, 0xDC)), /* vert lime */
+    [TH_3DS_WHITE]  = HOME_LOOK(RGB(0x5A, 0x6E, 0x84), RGB(0x46, 0x58, 0x6C), RGB(0xE8, 0xEE, 0xF4)), /* blanc glacier */
+    /* Noir cosmos : même aspect, version sombre */
+    [TH_3DS_BLACK] = { .bg = RGB(0x2A, 0x2B, 0x2E), .pattern = RGB(0x24, 0x25, 0x28), .bar = RGB(0x4A, 0x4C, 0x52),
+                       .bar2 = RGB(0x2E, 0x30, 0x34), .card = RGB(0x3A, 0x3C, 0x41), .card_hi = RGB(0x24, 0x3E, 0x52),
+                       .line = RGB(0x55, 0x58, 0x5F), .text = RGB(0xE4, 0xE6, 0xEA), .strong = WHITE,
+                       .dim = RGB(0xA0, 0xA4, 0xAC), .accent = RGB(0x3C, 0xB4, 0xF0), .accent2 = RGB(0x6C, 0xC8, 0xF6),
+                       .link = RGB(0x6C, 0xC8, 0xF6), .green = RGB(0x5C, 0xD0, 0x5A), .red = RGB(0xFF, 0x6A, 0x5E),
+                       .yellow = RGB(0xFF, 0xD0, 0x40), .toast = RGB(0x1C, 0x1D, 0x20), .onacc = RGB(0x08, 0x1E, 0x2C),
+                       .border = RGB(0x1C, 0x1D, 0x20), .radius = 0.75f, .border_w = 1, .shadow = 2,
+                       .sel = SEL_GLOW, .bar_style = BAR_GLOSS, .bg_style = BG_STRIPES },
+    /* Aero (Windows Vista / 7) : fond dégradé ciel avec reflets, barres en verre, cartes lumineuses à
+     * contour bleuté, sélection en dégradé bleu, boutons vitrés */
+    [TH_AERO] = { .bg = RGB(0xB9, 0xD8, 0xF2), .bg2 = RGB(0xEC, 0xF5, 0xFC), .pattern = 0, .bar = RGB(0xE8, 0xF2, 0xFB),
+                  .bar2 = RGB(0xA9, 0xCB, 0xEA), .card = RGB(0xFB, 0xFD, 0xFF), .card_hi = RGB(0xD9, 0xEB, 0xFB),
+                  .line = RGB(0xA8, 0xC4, 0xE0), .text = RGB(0x1E, 0x2E, 0x42), .strong = RGB(0x0A, 0x16, 0x26),
+                  .dim = RGB(0x4E, 0x62, 0x7A), .accent = RGB(0x1C, 0x6E, 0xC4), .accent2 = RGB(0x15, 0x5A, 0xA4),
+                  .link = RGB(0x0A, 0x5C, 0xB8), .green = RGB(0x1E, 0x8A, 0x32), .red = RGB(0xC8, 0x24, 0x24),
+                  .yellow = RGB(0x8A, 0x64, 0x00), .toast = RGB(0x1E, 0x3A, 0x5C), .onacc = WHITE,
+                  .border = RGB(0x7D, 0xA2, 0xCE), .radius = 0.45f, .border_w = 1, .shadow = 2,
+                  .sel = SEL_AERO, .bar_style = BAR_GLASS, .bg_style = BG_AERO },
+    [TH_AERO_DARK] = { .bg = RGB(0x0A, 0x1C, 0x34), .bg2 = RGB(0x1E, 0x44, 0x6E), .pattern = 0, .bar = RGB(0x4A, 0x6E, 0x96),
+                       .bar2 = RGB(0x14, 0x2C, 0x4C), .card = RGB(0x17, 0x2E, 0x4C), .card_hi = RGB(0x22, 0x4C, 0x7C),
+                       .line = RGB(0x34, 0x58, 0x84), .text = RGB(0xE0, 0xEC, 0xF8), .strong = WHITE,
+                       .dim = RGB(0x9C, 0xB4, 0xCE), .accent = RGB(0x4C, 0xA8, 0xF0), .accent2 = RGB(0x80, 0xC4, 0xF6),
+                       .link = RGB(0x80, 0xCC, 0xFF), .green = RGB(0x5C, 0xD0, 0x6A), .red = RGB(0xFF, 0x6E, 0x6E),
+                       .yellow = RGB(0xFF, 0xD6, 0x50), .toast = RGB(0x0A, 0x16, 0x28), .onacc = RGB(0x06, 0x14, 0x26),
+                       .border = RGB(0x4E, 0x7A, 0xAE), .radius = 0.45f, .border_w = 1, .shadow = 2,
+                       .sel = SEL_AERO, .bar_style = BAR_GLASS, .bg_style = BG_AERO },
+    /* Menu Paramètres de la 3DS : fond gris bleuté pointillé, listes en cases blanches bien bordées,
+     * coins peu arrondis, barres grises brillantes, sélection verte */
+    [TH_3DS_SET] = { .bg = RGB(0xD5, 0xDB, 0xE3), .pattern = RGB(0xC3, 0xCB, 0xD6), .bar = RGB(0xFA, 0xFB, 0xFC),
+                     .bar2 = RGB(0xC9, 0xD0, 0xDA), .card = RGB(0xFB, 0xFC, 0xFD), .card_hi = RGB(0xDF, 0xF5, 0xEA),
+                     .line = RGB(0xB4, 0xBD, 0xC9), .text = RGB(0x33, 0x3A, 0x44), .strong = RGB(0x15, 0x1A, 0x20),
+                     .dim = RGB(0x6E, 0x77, 0x84), .accent = RGB(0x1B, 0x8A, 0x5A), .accent2 = RGB(0x14, 0x6E, 0x48),
+                     .link = RGB(0x16, 0x6E, 0xC0), .green = RGB(0x2E, 0x9A, 0x3C), .red = RGB(0xCC, 0x33, 0x33),
+                     .yellow = RGB(0x8A, 0x64, 0x00), .toast = RGB(0x3C, 0x44, 0x50), .onacc = WHITE,
+                     .border = RGB(0xA3, 0xAE, 0xBC), .radius = 0.4f, .border_w = 1, .shadow = 1,
+                     .sel = SEL_GLOW, .bar_style = BAR_GLOSS, .bg_style = BG_DOTS },
+    /* Rétro Game Boy : 4 teintes de vert, coins carrés, cases à double contour, sélection par cadre
+     * clignotant, lignes d'écran */
+    [TH_GB] = { .bg = RGB(0x9B, 0xBC, 0x0F), .pattern = RGB(0x93, 0xB3, 0x0E), .bar = RGB(0x8B, 0xAC, 0x0F),
+                .bar2 = RGB(0x8B, 0xAC, 0x0F), .card = RGB(0x9B, 0xBC, 0x0F), .card_hi = RGB(0x8B, 0xAC, 0x0F),
+                .line = RGB(0x30, 0x62, 0x30), .text = RGB(0x0F, 0x38, 0x0F), .strong = RGB(0x0F, 0x38, 0x0F),
+                .dim = RGB(0x30, 0x62, 0x30), .accent = RGB(0x0F, 0x38, 0x0F), .accent2 = RGB(0x30, 0x62, 0x30),
+                .link = RGB(0x30, 0x62, 0x30), .green = RGB(0x30, 0x62, 0x30), .red = RGB(0x0F, 0x38, 0x0F),
+                .yellow = RGB(0x30, 0x62, 0x30), .toast = RGB(0x0F, 0x38, 0x0F), .onacc = RGB(0x9B, 0xBC, 0x0F),
+                .border = RGB(0x30, 0x62, 0x30), .radius = 0, .border_w = 2, .shadow = 0,
+                .sel = SEL_BOX, .bar_style = BAR_RETRO, .bg_style = BG_SCAN },
+    /* Rétro terminal : vert phosphore sur noir, lignes CRT, cadres fins */
+    [TH_TERM] = { .bg = RGB(0x00, 0x00, 0x00), .pattern = RGB(0x00, 0x14, 0x06), .bar = RGB(0x00, 0x12, 0x06),
+                  .bar2 = RGB(0x00, 0x12, 0x06), .card = RGB(0x00, 0x06, 0x02), .card_hi = RGB(0x00, 0x2A, 0x10),
+                  .line = RGB(0x0F, 0x5F, 0x2A), .text = RGB(0x33, 0xFF, 0x66), .strong = RGB(0x8C, 0xFF, 0xAA),
+                  .dim = RGB(0x1E, 0x9E, 0x46), .accent = RGB(0x33, 0xFF, 0x66), .accent2 = RGB(0x22, 0xCC, 0x55),
+                  .link = RGB(0x66, 0xFF, 0xCC), .green = RGB(0x33, 0xFF, 0x66), .red = RGB(0xFF, 0x55, 0x44),
+                  .yellow = RGB(0xFF, 0xDD, 0x33), .toast = RGB(0x0A, 0x3A, 0x18), .onacc = RGB(0x00, 0x12, 0x06),
+                  .border = RGB(0x1E, 0x9E, 0x46), .radius = 0, .border_w = 1, .shadow = 0,
+                  .sel = SEL_BOX, .bar_style = BAR_RETRO, .bg_style = BG_SCAN },
+};
+
+Theme g_th;
+
+void ui_set_theme(int t)
+{
+    if (t < 0 || t >= THEMES) t = TH_DARK;
+    g_th = THEMES_TAB[t];
+}
+
+static const struct { const char *key, *fr, *en; } THEME_INFO[THEMES] = {
+    [TH_DARK]       = { "dark",         "Standard sombre",            "Standard dark" },
+    [TH_LIGHT]      = { "light",        "Standard clair",             "Standard light" },
+    [TH_BLACK]      = { "black",        "Standard noir",              "Standard black" },
+    [TH_NAVY]       = { "navy",         "Standard nuit bleue",        "Standard midnight" },
+    [TH_3DS]        = { "3ds",          "3DS HOME bleu cobalt",       "3DS HOME cobalt blue" },
+    [TH_3DS_RED]    = { "3ds_red",      "3DS HOME rouge flamme",      "3DS HOME flame red" },
+    [TH_3DS_AQUA]   = { "3ds_aqua",     "3DS HOME bleu aqua",         "3DS HOME aqua blue" },
+    [TH_3DS_PINK]   = { "3ds_pink",     "3DS HOME rose corail",       "3DS HOME coral pink" },
+    [TH_3DS_PURPLE] = { "3ds_purple",   "3DS HOME violet minuit",     "3DS HOME midnight purple" },
+    [TH_3DS_GREEN]  = { "3ds_green",    "3DS HOME vert lime",         "3DS HOME lime green" },
+    [TH_3DS_WHITE]  = { "3ds_white",    "3DS HOME blanc glacier",     "3DS HOME ice white" },
+    [TH_3DS_BLACK]  = { "3ds_black",    "3DS HOME noir cosmos",       "3DS HOME cosmos black" },
+    [TH_3DS_SET]    = { "3ds_settings", "3DS Paramètres",             "3DS System Settings" },
+    [TH_AERO]       = { "aero",         "Aero",                       "Aero" },
+    [TH_AERO_DARK]  = { "aero_dark",    "Aero nuit",                  "Aero night" },
+    [TH_GB]         = { "retro_gb",     "Rétro Game Boy",             "Retro Game Boy" },
+    [TH_TERM]       = { "retro_term",   "Rétro terminal",             "Retro terminal" },
+};
+
+const char *ui_theme_name(int t, int fr)
+{
+    if (t < 0 || t >= THEMES) t = TH_DARK;
+    return fr ? THEME_INFO[t].fr : THEME_INFO[t].en;
+}
+
+const char *ui_theme_key(int t)
+{
+    return (t >= 0 && t < THEMES) ? THEME_INFO[t].key : "dark";
+}
+
+void ui_screen_begin(C3D_RenderTarget *t, float w)
+{
+    C2D_TargetClear(t, COL_BG);
+    C2D_SceneBegin(t);
+    u32 c = g_th.pattern;
+    switch (g_th.bg_style) {
+    case BG_STRIPES: /* rayures horizontales du menu HOME */
+        for (float y = 0; y < 240; y += 8) C2D_DrawRectSolid(0, y, 0.1f, w, 4, c);
+        break;
+    case BG_DOTS: /* trame de points */
+        for (float y = 6; y < 240; y += 14)
+            for (float x = ((int)y / 14 % 2) ? 13 : 6; x < w; x += 14) C2D_DrawRectSolid(x, y, 0.1f, 2, 2, c);
+        break;
+    case BG_SCAN: /* lignes d'écran cathodique */
+        for (float y = 0; y < 240; y += 3) C2D_DrawRectSolid(0, y, 0.1f, w, 1, c);
+        break;
+    case BG_AERO: { /* dégradé vertical + deux reflets lumineux en diagonale */
+        C2D_DrawRectangle(0, 0, 0.1f, w, 240, COL_BG, COL_BG, g_th.bg2, g_th.bg2);
+        u32 l1 = C2D_Color32(0xFF, 0xFF, 0xFF, 0x22), l0 = C2D_Color32(0xFF, 0xFF, 0xFF, 0x00);
+        C2D_DrawTriangle(w * 0.15f, 0, l1, w * 0.55f, 0, l1, -w * 0.15f, 240, l0, 0.1f);
+        C2D_DrawTriangle(w * 0.62f, 0, l1, w * 0.78f, 0, l1, w * 0.40f, 240, l0, 0.1f);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+void ui_card(float x, float y, float w, float h, float r, bool sel)
+{
+    switch (g_th.sel) {
+    case SEL_GLOW: /* 3DS : ombre douce, contour fin, halo autour de la sélection */
+        if (g_th.shadow) rrect_raw(x + 1, y + g_th.shadow, w, h, r * g_th.radius, C2D_Color32(0, 0, 0, 0x28));
+        if (sel) {
+            rrect_raw(x - 4, y - 4, w + 8, h + 8, (r + 4) * g_th.radius, with_alpha(COL_ACCENT, 0x50));
+            rrect_raw(x - 2, y - 2, w + 4, h + 4, (r + 2) * g_th.radius, COL_ACCENT);
+        } else if (g_th.border_w) {
+            rrect_raw(x - 1, y - 1, w + 2, h + 2, (r + 1) * g_th.radius, g_th.border);
+        }
+        rrect_raw(x, y, w, h, r * g_th.radius, sel ? COL_CARD_HI : COL_CARD);
+        /* reflet en haut de la carte */
+        C2D_DrawRectSolid(x + r * g_th.radius, y + 1, 0.5f, w - 2 * r * g_th.radius, 1, with_alpha(0xFFFFFFFFu, 0xA0));
+        break;
+    case SEL_BOX: { /* rétro : cadre carré, double contour, coins clignotants sur la sélection */
+        float b = g_th.border_w ? g_th.border_w : 1;
+        C2D_DrawRectSolid(x, y, 0.5f, w, h, sel ? COL_ACCENT : g_th.border);
+        C2D_DrawRectSolid(x + b, y + b, 0.5f, w - 2 * b, h - 2 * b, sel ? COL_CARD_HI : COL_CARD);
+        if (sel && (g_ui_frame / 20) % 2 == 0) {
+            const float L = 8, T = 2;
+            float xs[2] = { x - 3, x + w + 3 - T }, ys[2] = { y - 3, y + h + 3 - T };
+            for (int i = 0; i < 2; i++)
+                for (int j = 0; j < 2; j++) {
+                    float cx = xs[i], cy = ys[j];
+                    C2D_DrawRectSolid(i ? cx - L + T : cx, cy, 0.5f, L, T, COL_ACCENT);
+                    C2D_DrawRectSolid(cx, j ? cy - L + T : cy, 0.5f, T, L, COL_ACCENT);
+                }
+        }
+        break;
+    }
+    case SEL_AERO: { /* Aero : carte claire à contour bleuté, sélection en dégradé bleu avec reflet */
+        float rr = r * g_th.radius;
+        if (g_th.shadow) rrect_raw(x + 1, y + g_th.shadow, w, h, rr, C2D_Color32(0, 0x20, 0x50, 0x28));
+        rrect_raw(x - 1, y - 1, w + 2, h + 2, rr + 1, sel ? COL_ACCENT : g_th.border);
+        rrect_raw(x, y, w, h, rr, sel ? COL_CARD_HI : COL_CARD);
+        if (sel) /* dégradé vertical sous le reflet (sans recouvrir les coins arrondis) */
+            C2D_DrawRectangle(x + rr, y + 1, 0.5f, w - 2 * rr, h - 2, with_alpha(0xFFFFFFFFu, 0x00), with_alpha(0xFFFFFFFFu, 0x00),
+                              with_alpha(COL_ACCENT, 0x30), with_alpha(COL_ACCENT, 0x30));
+        C2D_DrawRectSolid(x + rr, y + 1, 0.5f, w - 2 * rr, h / 2 - 1, with_alpha(0xFFFFFFFFu, sel ? 0x70 : 0x48));
+        break;
+    }
+    default: /* standard : anneau de couleur autour de la sélection */
+        if (sel) rrect_raw(x - 2, y - 2, w + 4, h + 4, (r + 2) * g_th.radius, COL_ACCENT);
+        rrect_raw(x, y, w, h, r * g_th.radius, sel ? COL_CARD_HI : COL_CARD);
+        break;
+    }
+}
+
+void ui_bar_bg(float x, float y, float w, float h, bool edge_bottom)
+{
+    float ey = edge_bottom ? y + h - 1 : y; /* trait du côté du contenu */
+    switch (g_th.bar_style) {
+    case BAR_GLOSS:
+        C2D_DrawRectangle(x, y, 0.5f, w, h, g_th.bar, g_th.bar, g_th.bar2, g_th.bar2);
+        C2D_DrawRectSolid(x, y + (edge_bottom ? 0 : 1), 0.5f, w, 1, with_alpha(0xFFFFFFFFu, 0xC0));
+        C2D_DrawRectSolid(x, ey, 0.5f, w, 1, g_th.border);
+        if (edge_bottom) C2D_DrawRectSolid(x, y + h, 0.5f, w, 2, C2D_Color32(0, 0, 0, 0x22)); /* ombre */
+        else C2D_DrawRectSolid(x, y - 2, 0.5f, w, 2, C2D_Color32(0, 0, 0, 0x22));
+        break;
+    case BAR_GLASS: /* verre : dégradé, moitié haute brillante, liseré clair et contour */
+        C2D_DrawRectangle(x, y, 0.5f, w, h, g_th.bar, g_th.bar, g_th.bar2, g_th.bar2);
+        C2D_DrawRectSolid(x, y, 0.5f, w, h / 2, with_alpha(0xFFFFFFFFu, 0x40));
+        C2D_DrawRectSolid(x, edge_bottom ? y : y + 1, 0.5f, w, 1, with_alpha(0xFFFFFFFFu, 0xD0));
+        C2D_DrawRectSolid(x, ey, 0.5f, w, 1, g_th.border);
+        if (edge_bottom) C2D_DrawRectSolid(x, y + h, 0.5f, w, 3, C2D_Color32(0, 0x20, 0x50, 0x20));
+        else C2D_DrawRectSolid(x, y - 3, 0.5f, w, 3, C2D_Color32(0, 0x20, 0x50, 0x20));
+        break;
+    case BAR_RETRO:
+        C2D_DrawRectSolid(x, y, 0.5f, w, h, g_th.bar);
+        C2D_DrawRectSolid(x, ey, 0.5f, w, 1, COL_ACCENT);
+        C2D_DrawRectSolid(x, edge_bottom ? ey - 3 : ey + 3, 0.5f, w, 1, COL_ACCENT);
+        break;
+    default:
+        C2D_DrawRectSolid(x, y, 0.5f, w, h, g_th.bar);
+        C2D_DrawRectSolid(x, ey, 0.5f, w, 1, COL_LINE);
+        break;
+    }
+}
+
+static bool s_swap_ab, s_swap_xy;
+
+void ui_set_glyph_swap(bool ab, bool xy)
+{
+    s_swap_ab = ab;
+    s_swap_xy = xy;
+}
+
+/* Glyphes de boutons de la police système : EE 80 80 (A), 81 (B), 82 (X), 83 (Y) */
+static const char *swap_glyphs(const char *s, char *tmp, size_t n)
+{
+    if ((!s_swap_ab && !s_swap_xy) || !strstr(s, "\xEE\x80")) return s;
+    size_t l = strlen(s);
+    if (l >= n) return s;
+    memcpy(tmp, s, l + 1);
+    for (size_t i = 0; i + 2 < l; i++) {
+        if ((unsigned char)tmp[i] != 0xEE || (unsigned char)tmp[i + 1] != 0x80) continue;
+        unsigned char c = (unsigned char)tmp[i + 2];
+        if (s_swap_ab && (c == 0x80 || c == 0x81)) tmp[i + 2] = (char)(c ^ 1);
+        else if (s_swap_xy && (c == 0x82 || c == 0x83)) tmp[i + 2] = (char)(c ^ 1);
+        i += 2;
+    }
+    return tmp;
 }

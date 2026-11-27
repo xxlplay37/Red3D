@@ -8,6 +8,7 @@
  *   thread principal : affiche l'image dont l'horodatage correspond à l'horloge du son
  */
 #include "video.h"
+#include "audio.h"
 #include "net.h"
 
 #include <math.h>
@@ -37,7 +38,6 @@
 static LightLock s_log_lock;
 static bool s_log_ready;
 static u64 s_t0;
-static LightLock s_ff_lock; /* FFmpeg est compilé sans pthreads : on sérialise ses initialisations */
 
 static void vlog(const char *fmt, ...)
 {
@@ -141,7 +141,7 @@ static C2D_Image s_img;
 static bool s_tex_ok, s_has_frame, s_tex_free_pending;
 
 /* son */
-static bool s_ndsp_tried, s_ndsp_ok;
+static bool s_ndsp_ok; /* DSP initialisé par audio.c */
 static volatile int s_audio_state; /* 0 en attente, 1 actif, 2 aucun son */
 static volatile bool s_adone;      /* décodage du son terminé */
 static volatile int s_aqueued;
@@ -570,9 +570,9 @@ static bool seek_track(Track *t, double to)
 /* Un seul thread à la fois dans les initialisations FFmpeg (pas de pthreads dans notre build) */
 static bool track_open_safe(Track *t, Source *src, enum AVMediaType type)
 {
-    LightLock_Lock(&s_ff_lock);
+    audio_ff_lock(); /* verrou partagé avec la musique (audio.c) */
     bool ok = track_open(t, src, type);
-    LightLock_Unlock(&s_ff_lock);
+    audio_ff_unlock();
     return ok;
 }
 
@@ -1036,7 +1036,6 @@ bool video_open(const char *video_id, int max_p, bool preload)
     s_seeking = s_seek_first = s_seek_paused = false;
     s_has_frame = false;
     LightLock_Init(&s_vq_lock);
-    LightLock_Init(&s_ff_lock);
     CondVar_Init(&s_vq_cv);
     s_logged_frame = false;
     s_open_ms = osGetTime();
@@ -1050,13 +1049,8 @@ bool video_open(const char *video_id, int max_p, bool preload)
         return false;
     }
 
-    if (!s_ndsp_tried) {
-        s_ndsp_tried = true;
-        Result nrc = ndspInit(); /* nécessite sdmc:/3ds/dspfirm.cdc */
-        s_ndsp_ok = R_SUCCEEDED(nrc);
-        vlog("ndspInit : 0x%08lX (%s)", (unsigned long)nrc, s_ndsp_ok ? "ok" : "pas de son");
-        if (s_ndsp_ok) ndspSetOutputMode(NDSP_OUTPUT_STEREO);
-    }
+    s_ndsp_ok = audio_ok(); /* ndspInit fait au démarrage par audio.c (nécessite sdmc:/3ds/dspfirm.cdc) */
+    vlog("DSP : %s", s_ndsp_ok ? "ok" : "pas de son");
 
     s_new3ds = false;
     APT_CheckNew3DS(&s_new3ds);
@@ -1323,8 +1317,7 @@ void video_exit(void)
         s_tex_free_pending = false;
         s_tex_ok = false;
     }
-    if (s_ndsp_ok) ndspExit();
-    s_ndsp_ok = false;
+    s_ndsp_ok = false; /* ndspExit : audio_exit() */
 }
 
 bool video_seeking(void) { return s_seeking; }

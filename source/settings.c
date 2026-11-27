@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "reddit.h"
+#include "ui.h"
 
 #include <3ds.h>
 #include <ctype.h>
@@ -41,6 +42,11 @@ static const char *CB_KEYS[]   = { "4", "8", "12", "20", "all" };
 static const int   CB_VALUES[] = { 4, 8, 12, 20, 0 };
 static const char *HOME_KEYS[] = { "suggestions", "subs", "both" };
 static const char *SUG_KEYS[]  = { "lang", "gaming", "nintendo", "tech", "science", "news", "fun", "off" };
+static const char *DENS_KEYS[]  = { "normal", "compact", "large" };
+static const char *THUMB_KEYS[] = { "right", "left" };
+static const char *BTN_KEYS[]   = { "standard", "swap_ab", "swap_abxy" };
+static const char *LR_KEYS[]    = { "sort", "page" };
+static const char *S3D_KEYS[]   = { "off", "zoom", "volume", "text" };
 
 static char *trim(char *s)
 {
@@ -83,6 +89,9 @@ static void defaults(void)
     case CFG_LANGUAGE_PT: g_cfg.content_lang = CL_PT; break;
     default:              g_cfg.content_lang = CL_ALL; break;
     }
+    g_cfg.sfx = 1;
+    snprintf(g_cfg.music, sizeof(g_cfg.music), "off");
+    g_cfg.music_vol = 1;
     g_cfg.default_sort = 0;
     g_cfg.nsfw = NSFW_BLUR;
     g_cfg.images = IMAGES_ALL;
@@ -119,6 +128,23 @@ void settings_load(void)
         else if (!strcmp(k, "translate_to")) g_cfg.tr_lang = find_key(v, TL_KEYS, TL_LANGS, g_cfg.tr_lang);
         else if (!strcmp(k, "recent")) snprintf(g_cfg.recent, sizeof(g_cfg.recent), "%s", v);
         else if (!strcmp(k, "subs")) snprintf(g_cfg.subs, sizeof(g_cfg.subs), "%s", v);
+        else if (!strcmp(k, "theme")) {
+            for (int t = 0; t < THEMES; t++)
+                if (!strcmp(v, ui_theme_key(t))) g_cfg.theme = t;
+        }
+        else if (!strcmp(k, "density")) g_cfg.density = find_key(v, DENS_KEYS, DENSITIES, DENS_NORMAL);
+        else if (!strcmp(k, "thumbnails")) g_cfg.thumb_left = find_key(v, THUMB_KEYS, 2, 0);
+        else if (!strcmp(k, "buttons")) g_cfg.buttons = find_key(v, BTN_KEYS, BTN_LAYOUTS, BTN_STD);
+        else if (!strcmp(k, "lr")) g_cfg.lr_mode = find_key(v, LR_KEYS, LR_MODES, LR_SORT);
+        else if (!strcmp(k, "slider_3d")) g_cfg.slider = find_key(v, S3D_KEYS, S3D_MODES, S3D_OFF);
+        else if (!strcmp(k, "sounds")) g_cfg.sfx = strcmp(v, "off") != 0;
+        else if (!strcmp(k, "sound_pack")) snprintf(g_cfg.sfx_pack, sizeof(g_cfg.sfx_pack), "%s", strcmp(v, "default") ? v : "");
+        else if (!strcmp(k, "music"))
+            snprintf(g_cfg.music, sizeof(g_cfg.music), "%s", !strcmp(v, "default") ? "" : !strcmp(v, "random") ? "*" : v);
+        else if (!strcmp(k, "music_volume")) {
+            int p = atoi(v);
+            g_cfg.music_vol = p <= 25 ? 0 : p <= 50 ? 1 : p <= 75 ? 2 : 3;
+        }
         else if (!strcmp(k, "home_feed")) g_cfg.home_mode = find_key(v, HOME_KEYS, HOME_MODES, HOME_SUGGEST);
         else if (!strcmp(k, "suggestions")) g_cfg.sug_theme = find_key(v, SUG_KEYS, SUG_THEMES, SUG_LANG);
         else if (!strcmp(k, "redlib") && *v) snprintf(g_cfg.redlib, sizeof(g_cfg.redlib), "%s", v);
@@ -160,6 +186,24 @@ bool settings_save(void)
             "ui_lang=%s\n"
             "# Langue du fil d'accueil : all, fr, en, es, de, it, pt\n"
             "content_lang=%s\n"
+            "# Thème : dark, light, black, navy, 3ds, 3ds_red, 3ds_aqua, 3ds_pink, 3ds_purple, 3ds_green, 3ds_white,\n"
+            "#         3ds_black, 3ds_settings, aero, aero_dark, retro_gb, retro_term\n"
+            "theme=%s\n"
+            "# Disposition du fil : normal, compact, large ; miniatures : right, left\n"
+            "density=%s\n"
+            "thumbnails=%s\n"
+            "# Boutons : standard, swap_ab (A/B inversés), swap_abxy (A/B et X/Y inversés)\n"
+            "buttons=%s\n"
+            "# L / R dans le fil : sort (changer le tri), page (défiler)\n"
+            "lr=%s\n"
+            "# Curseur 3D : off, zoom (images et vidéos), volume (vidéos), text (taille du texte)\n"
+            "slider_3d=%s\n"
+            "# Sons de l'interface : on, off ; pack : default ou un dossier de sdmc:/3ds/reddit3ds/sons\n"
+            "sounds=%s\n"
+            "sound_pack=%s\n"
+            "# Musique : off, default, random (dossier musique) ou un fichier du dossier musique ; volume : 25 à 100\n"
+            "music=%s\n"
+            "music_volume=%d\n"
             "# Fil d'accueil : suggestions, subs (abonnements), both (les deux)\n"
             "home_feed=%s\n"
             "# Suggestions (accueil et onglet Subs) : lang, gaming, nintendo, tech, science, news, fun, off\n"
@@ -198,6 +242,10 @@ bool settings_save(void)
             "# Facultatif : client_id d'une app Reddit \"installed app\" (API officielle)\n"
             "client_id=%s\n",
             LANG_KEYS[g_cfg.ui_lang], CL_KEYS[g_cfg.content_lang],
+            ui_theme_key(g_cfg.theme), DENS_KEYS[g_cfg.density], THUMB_KEYS[g_cfg.thumb_left], BTN_KEYS[g_cfg.buttons],
+            LR_KEYS[g_cfg.lr_mode], S3D_KEYS[g_cfg.slider],
+            g_cfg.sfx ? "on" : "off", g_cfg.sfx_pack[0] ? g_cfg.sfx_pack : "default",
+            !strcmp(g_cfg.music, "*") ? "random" : g_cfg.music[0] ? g_cfg.music : "default", (g_cfg.music_vol + 1) * 25,
             HOME_KEYS[g_cfg.home_mode], SUG_KEYS[g_cfg.sug_theme], g_cfg.subs, g_cfg.start_sub,
             SORT_KEYS[g_cfg.default_sort], NSFW_KEYS[g_cfg.nsfw], IMG_KEYS[g_cfg.images],
             TEXT_KEYS[g_cfg.text_size], TL_KEYS[g_cfg.tr_lang], VQ_KEYS[g_cfg.video_q], VM_KEYS[g_cfg.video_mode], IQ_KEYS[g_cfg.img_quality], CB_KEYS[g_cfg.com_batch], SRC_KEYS[g_cfg.source], g_cfg.redlib, g_cfg.redlib_server, g_cfg.recent, g_cfg.client_id);

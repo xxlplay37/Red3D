@@ -87,7 +87,8 @@ fi
 # --------------------------------------------------------------------------
 # 3. FFmpeg (lecture vidéo) : compilé une seule fois
 # --------------------------------------------------------------------------
-if [ ! -f "$TC/ffmpeg/lib/libavcodec.a" ]; then
+FFCONF=$(sed -n 's/^FFMPEG_CONF="\(.*\)"/\1/p' "$ROOT/tools/build_ffmpeg.sh")
+if [ ! -f "$TC/ffmpeg/lib/libavcodec.a" ] || [ "$(cat "$TC/ffmpeg/.conf" 2>/dev/null)" != "$FFCONF" ]; then
     log "Compilation de FFmpeg (une seule fois, quelques minutes)..."
     bash "$ROOT/tools/build_ffmpeg.sh" "$TC/ffsrc" "$TC/ffmpeg"
 fi

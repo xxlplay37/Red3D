@@ -2,22 +2,54 @@
 #include <3ds.h>
 #include <citro2d.h>
 
-/* Palette : thème sombre moderne */
-#define COL_BG      C2D_Color32(0x0F, 0x10, 0x12, 0xFF)
-#define COL_BAR     C2D_Color32(0x17, 0x18, 0x1B, 0xFF)
-#define COL_CARD    C2D_Color32(0x1C, 0x1D, 0x21, 0xFF)
-#define COL_CARD_HI C2D_Color32(0x26, 0x28, 0x2E, 0xFF)
+/* Palette du thème actif (ui_set_theme). COL_WHITE = texte fort du thème (blanc sur thème sombre,
+ * presque noir sur thème clair) ; COL_ONACC = vrai blanc, pour ce qui est posé sur une couleur
+ * (bouton principal, pastille, voile sur une vidéo). */
+/* Un thème change les couleurs ET l'aspect : forme des coins, contours, ombre, façon de montrer la
+ * sélection, barres, boutons et motif du fond. */
+enum { SEL_RING, SEL_GLOW, SEL_BOX, SEL_AERO };  /* sélection : anneau (standard), halo (3DS), cadre clignotant (rétro), dégradé bleu (Aero) */
+enum { BAR_FLAT, BAR_GLOSS, BAR_RETRO, BAR_GLASS }; /* barres : unie, brillante (3DS), double trait (rétro), verre (Aero) */
+enum { BG_PLAIN, BG_STRIPES, BG_DOTS, BG_SCAN, BG_AERO }; /* fond : uni, rayures, points, lignes CRT, dégradé + reflets (Aero) */
+typedef struct {
+    u32 bg, bar, card, card_hi, line, text, strong, dim, accent, accent2, link, green, red, yellow, toast;
+    u32 pattern;      /* couleur du motif de fond */
+    u32 onacc;        /* texte posé sur la couleur d'accent */
+    u32 border;       /* contour des cartes et des boutons */
+    u32 bar2;         /* bas du dégradé des barres (BAR_GLOSS) */
+    u32 bg2;          /* bas du dégradé du fond (BG_AERO) */
+    float radius;     /* facteur des arrondis (0 = coins carrés) */
+    u8 border_w;      /* épaisseur du contour des cartes (0 = aucun) */
+    u8 shadow;        /* ombre portée des cartes (px) */
+    u8 sel, bar_style, bg_style;
+} Theme;
+extern Theme g_th;
+
+enum { TH_DARK, TH_LIGHT, TH_BLACK, TH_NAVY,
+       TH_3DS, TH_3DS_RED, TH_3DS_AQUA, TH_3DS_PINK, TH_3DS_PURPLE, TH_3DS_GREEN, TH_3DS_WHITE, TH_3DS_BLACK,
+       TH_3DS_SET, TH_AERO, TH_AERO_DARK, TH_GB, TH_TERM, THEMES };
+/* Clé du thème dans config.ini */
+const char *ui_theme_key(int t);
+void ui_set_theme(int t);
+/* Nom du thème (fr = 1 : français) */
+const char *ui_theme_name(int t, int fr);
+
+#define COL_BG      (g_th.bg)
+#define COL_BAR     (g_th.bar)
+#define COL_CARD    (g_th.card)
+#define COL_CARD_HI (g_th.card_hi)
 #define COL_SEL     COL_CARD_HI
-#define COL_LINE    C2D_Color32(0x2C, 0x2E, 0x34, 0xFF)
-#define COL_TEXT    C2D_Color32(0xE6, 0xE8, 0xEB, 0xFF)
-#define COL_WHITE   C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF)
-#define COL_DIM     C2D_Color32(0x8E, 0x93, 0x9A, 0xFF)
-#define COL_ACCENT  C2D_Color32(0xFF, 0x45, 0x00, 0xFF)
-#define COL_ACCENT2 C2D_Color32(0xFF, 0x7A, 0x3D, 0xFF)
-#define COL_LINK    C2D_Color32(0x4F, 0xBC, 0xFF, 0xFF)
-#define COL_GREEN   C2D_Color32(0x46, 0xD1, 0x60, 0xFF)
-#define COL_RED     C2D_Color32(0xFF, 0x58, 0x5B, 0xFF)
-#define COL_YELLOW  C2D_Color32(0xFF, 0xD6, 0x35, 0xFF)
+#define COL_LINE    (g_th.line)
+#define COL_TEXT    (g_th.text)
+#define COL_WHITE   (g_th.strong)
+#define COL_DIM     (g_th.dim)
+#define COL_ACCENT  (g_th.accent)
+#define COL_ACCENT2 (g_th.accent2)
+#define COL_LINK    (g_th.link)
+#define COL_GREEN   (g_th.green)
+#define COL_RED     (g_th.red)
+#define COL_YELLOW  (g_th.yellow)
+#define COL_ONACC   (g_th.onacc)
+#define COL_OVERLAY C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF) /* sur un voile noir ou une vidéo, quel que soit le thème */
 #define COL_SCRIM   C2D_Color32(0x00, 0x00, 0x00, 0xA0)
 
 /* Glyphes boutons de la police système (UTF-8) */
@@ -33,6 +65,10 @@ void  ui_init(void);
 void  ui_exit(void);
 void  ui_set_text_scale(float m);
 void  ui_frame_begin(void); /* à appeler après C3D_FrameBegin */
+/* Efface l'écran (fond du thème, rayures éventuelles) et commence à y dessiner */
+void  ui_screen_begin(C3D_RenderTarget *t, float w);
+/* Inversion des glyphes de boutons affichés (A<->B, X<->Y) quand les commandes sont inversées */
+void  ui_set_glyph_swap(bool ab, bool xy);
 float ui_line_height(float scale);
 float ui_text_width(const char *s, float scale);
 void  ui_text(float x, float y, float scale, u32 color, const char *s);
@@ -43,6 +79,10 @@ extern u32 g_ui_frame; /* compteur de frames (animations) */
 /* Formes */
 void  ui_rrect(float x, float y, float w, float h, float r, u32 color);
 void  ui_rrect_outline(float x, float y, float w, float h, float r, float t, u32 color, u32 inner);
+/* Carte du thème (contour, ombre, sélection selon le style) */
+void  ui_card(float x, float y, float w, float h, float r, bool sel);
+/* Fond de barre (en-tête : edge_bottom = vrai ; barre d'outils du bas : faux) */
+void  ui_bar_bg(float x, float y, float w, float h, bool edge_bottom);
 /* Pastille de texte, renvoie sa largeur */
 float ui_pill(float x, float y, const char *text, float scale, u32 bg, u32 fg);
 float ui_pill_width(const char *text, float scale);
