@@ -30,6 +30,12 @@ bool video_has_audio(void);     /* la vidéo a une piste son */
 bool video_sound_ok(void);      /* le son est réellement joué (NDSP disponible) */
 void video_toggle_pause(void);
 void video_restart(void);
+/* Déplacement dans la vidéo (secondes) : retour en arrière ou avance */
+bool video_can_seek(void);
+void video_seek(float to);
+void video_seek_by(float delta);
+bool video_seeking(void);      /* repositionnement en cours */
+bool video_seek_paused(void);  /* restera en pause une fois repositionnée */
 void video_set_volume(float v); /* 0..1 */
 float video_volume(void);
 

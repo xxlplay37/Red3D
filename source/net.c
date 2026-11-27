@@ -67,6 +67,11 @@ NetConn *net_conn_new(volatile bool *cancel)
     return c;
 }
 
+void net_conn_set_cancel(NetConn *c, volatile bool *cancel)
+{
+    if (c) c->cancel = cancel;
+}
+
 long long net_conn_total(const NetConn *c)
 {
     return c ? c->dl_total : 0;

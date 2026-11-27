@@ -7,7 +7,7 @@
  * (animations, défilement, annulation avec B) pendant les chargements.
  */
 
-typedef enum { JOB_NONE, JOB_FEED, JOB_COMMENTS, JOB_SEARCH, JOB_TRANSLATE } JobType;
+typedef enum { JOB_NONE, JOB_FEED, JOB_COMMENTS, JOB_SEARCH, JOB_TRANSLATE, JOB_STATUS } JobType;
 
 typedef struct {
     JobType type;
@@ -21,12 +21,14 @@ typedef struct {
     int ntexts;
     /* Sorties */
     char **out;                /* JOB_TRANSLATE : traductions (appartiennent au job) */
-    volatile int progress;     /* JOB_TRANSLATE : out[0..progress) est prêt */
+    volatile int progress;     /* JOB_TRANSLATE : out[0..progress) est prêt ; JOB_STATUS : stat[0..progress) */
     int rc;
     char err[256];
     Feed feed;
     Comments comments;
     SubList subs;
+    InstStatus stat[REDDIT_MAX_INSTANCES]; /* JOB_STATUS : statut des instances Redlib */
+    int nstat;
 } Job;
 
 void job_init(void);

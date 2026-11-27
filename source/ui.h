@@ -48,6 +48,7 @@ float ui_pill(float x, float y, const char *text, float scale, u32 bg, u32 fg);
 float ui_pill_width(const char *text, float scale);
 void  ui_spinner(float cx, float cy, float r, u32 color);
 void  ui_icon_up(float x, float y, float s, u32 color);
+void  ui_icon_down(float x, float y, float s, u32 color);
 void  ui_icon_comment(float x, float y, float s, u32 color);
 void  ui_logo(float cx, float cy, float r);
 void  ui_text_center(float cx, float y, float scale, u32 color, const char *s);

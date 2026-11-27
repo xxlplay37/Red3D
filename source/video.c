@@ -94,6 +94,9 @@ typedef struct {
     FILE *wf, *rf;       /* préchargement : écriture puis relecture d'un fichier temporaire */
     char path[96];
     volatile bool eof, failed;
+    volatile bool abort;  /* arrêt de ce téléchargement (fermeture ou déplacement dans la vidéo) */
+    long long total;      /* taille du fichier, 0 si encore inconnue */
+    s32 prio;
 } Source;
 
 typedef struct {
@@ -152,6 +155,15 @@ static float s_volume = 0.8f;
 static volatile float s_clock_pub; /* lu par le thread vidéo (32 bits : lecture atomique) */
 static double s_clock_last;
 static u64 s_wall_start, s_pause_start, s_pause_acc;
+static double s_clock_base;        /* sans son : position au démarrage de l'horloge murale */
+
+/* déplacement dans la vidéo : le thread principal incrémente s_seek_gen, les threads de décodage
+ * se repositionnent puis recopient le numéro dans leur accusé de réception */
+static volatile int s_seek_gen, s_vgen_ack, s_agen_ack;
+static volatile float s_seek_to;
+static volatile bool s_seeking;    /* en attente des nouvelles images / du nouveau son */
+static volatile bool s_seek_first; /* afficher la première image décodée après le déplacement */
+static bool s_seek_paused;         /* rester en pause une fois repositionné */
 
 /* ------------------------------------------------------------------ */
 /* Source : téléchargement -> tampon circulaire -> lecture par FFmpeg */
@@ -162,7 +174,7 @@ static size_t src_data(const void *data, size_t len, void *ud)
     const u8 *p = data;
     size_t left = len;
     if (s->wf) { /* préchargement : tout va sur la carte SD */
-        if (s_stop) return 0;
+        if (s_stop || s->abort) return 0;
         if (fwrite(data, 1, len, s->wf) != len) { s->failed = true; return 0; }
         LightLock_Lock(&s->lock);
         s->got += (long long)len;
@@ -171,8 +183,8 @@ static size_t src_data(const void *data, size_t len, void *ud)
     }
     LightLock_Lock(&s->lock);
     while (left > 0) {
-        while (s->size == s->cap && !s_stop) CondVar_WaitTimeout(&s->cv, &s->lock, 50 * MS);
-        if (s_stop) { LightLock_Unlock(&s->lock); return 0; }
+        while (s->size == s->cap && !s_stop && !s->abort) CondVar_WaitTimeout(&s->cv, &s->lock, 50 * MS);
+        if (s_stop || s->abort) { LightLock_Unlock(&s->lock); return 0; }
         size_t tail = (s->head + s->size) % s->cap;
         size_t chunk = s->cap - s->size;
         if (chunk > left) chunk = left;
@@ -192,10 +204,10 @@ static void src_thread(void *arg)
 {
     Source *s = arg;
     char err[128];
-    for (int tries = 0; !s_stop; tries++) {
+    for (int tries = 0; !s_stop && !s->abort; tries++) {
         long code = 0;
         int r = http_stream(s->conn, s->url, s->got, src_data, s, &code, err, sizeof(err));
-        if (s_stop || s->failed) break;
+        if (s_stop || s->abort || s->failed) break;
         if (r == 0) {
             if (code != 200 && code != 206) s->failed = true;
             break; /* terminé */
@@ -251,16 +263,20 @@ static bool src_start(Source *s, const char *url, size_t cap, int core, const ch
     } else {
         s->buf = malloc(cap);
     }
-    s->conn = adopt ? adopt : net_conn_new(&s_stop);
+    s->abort = false;
+    s->conn = adopt ? adopt : net_conn_new(&s->abort);
+    if (adopt) net_conn_set_cancel(adopt, &s->abort);
     if ((!file && !s->buf) || (file && !s->wf) || !s->conn) return false;
     s32 prio = 0x30;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
-    s->thread = make_thread(src_thread, s, 128 * 1024, prio + 1, core); /* TLS : pile confortable */
+    s->prio = prio + 1;
+    s->thread = make_thread(src_thread, s, 128 * 1024, s->prio, core); /* TLS : pile confortable */
     return s->thread != NULL;
 }
 
 static void src_stop(Source *s)
 {
+    s->abort = true;
     if (s->thread) {
         threadJoin(s->thread, U64_MAX);
         threadFree(s->thread);
@@ -277,6 +293,77 @@ static bool src_open_read(Source *s)
 {
     s->rf = fopen(s->path, "rb");
     return s->rf != NULL;
+}
+
+/* Lecture en flux : relance le téléchargement à partir de l'octet off (requête Range).
+ * Appelé uniquement par le thread qui lit cette source. */
+static void src_restart(Source *s, long long off)
+{
+    s->abort = true;
+    LightLock_Lock(&s->lock);
+    CondVar_Broadcast(&s->cv);
+    LightLock_Unlock(&s->lock);
+    if (s->thread) {
+        threadJoin(s->thread, U64_MAX);
+        threadFree(s->thread);
+        s->thread = NULL;
+    }
+    LightLock_Lock(&s->lock);
+    s->head = s->size = 0;
+    s->got = off;
+    s->eof = false;
+    s->failed = false;
+    LightLock_Unlock(&s->lock);
+    if (s_stop) { s->eof = true; return; }
+    s->abort = false;
+    s->thread = make_thread(src_thread, s, 128 * 1024, s->prio, -2);
+    if (!s->thread) s->failed = s->eof = true;
+}
+
+static long long src_total(Source *s)
+{
+    if (s->total <= 0) s->total = net_conn_total(s->conn);
+    return s->total;
+}
+
+/* Déplacement dans le fichier, demandé par FFmpeg (installé une fois la piste ouverte) */
+static int64_t src_seek(void *opaque, int64_t off, int whence)
+{
+    Source *s = opaque;
+    whence &= ~AVSEEK_FORCE;
+    if (s->rf) { /* fichier préchargé */
+        if (whence == AVSEEK_SIZE) return s->got;
+        if (fseeko(s->rf, (off_t)off, whence) != 0) return -1;
+        return (int64_t)ftello(s->rf);
+    }
+    long long total = src_total(s);
+    if (whence == AVSEEK_SIZE) return total > 0 ? total : -1;
+
+    LightLock_Lock(&s->lock);
+    long long pos = s->got - (long long)s->size; /* prochain octet rendu à FFmpeg */
+    LightLock_Unlock(&s->lock);
+    if (whence == SEEK_CUR) off += pos;
+    else if (whence == SEEK_END) {
+        if (total <= 0) return -1;
+        off += total;
+    }
+    if (off < 0 || (total > 0 && off > total)) return -1;
+
+    /* cible déjà dans le tampon (un peu plus loin) : on saute simplement les octets */
+    LightLock_Lock(&s->lock);
+    pos = s->got - (long long)s->size;
+    if (off >= pos && off <= s->got) {
+        size_t skip = (size_t)(off - pos);
+        s->head = (s->head + skip) % s->cap;
+        s->size -= skip;
+        CondVar_Broadcast(&s->cv);
+        LightLock_Unlock(&s->lock);
+        return off;
+    }
+    LightLock_Unlock(&s->lock);
+    vlog("source : reprise du telechargement a l'octet %lld", (long long)off);
+    src_restart(s, off);
+    return off;
 }
 
 /* ------------------------------------------------------------------ */
@@ -455,10 +542,29 @@ static bool track_open(Track *t, Source *src, enum AVMediaType type)
     t->pkt = av_packet_alloc();
     t->frm = av_frame_alloc();
     if (!t->pkt || !t->frm) goto fail;
+    /* Retour en arrière : on fournit une fonction de déplacement, installée APRÈS l'ouverture.
+     * Surtout PAS de seekable = AVIO_SEEKABLE_NORMAL : avec ce drapeau, le démuxeur MP4 fragmenté ne
+     * s'arrête plus sur le bloc mdat de chaque fragment (mov.c, mov_read_default) et le saute pour lire
+     * le fragment suivant ; en lecture directe ça relançait sans cesse le téléchargement (coupures, sauts).
+     * Non « seekable », FFmpeg lit en avant comme avant et n'appelle src_seek que pour revenir en arrière
+     * (av_seek_frame s'appuie alors sur l'index des fragments déjà lus). */
+    t->avio->seek = src_seek;
     return true;
 fail:
     track_close(t);
     return false;
+}
+
+/* Repositionne une piste sur l'image clé qui précède `to` (secondes) */
+static bool seek_track(Track *t, double to)
+{
+    avcodec_flush_buffers(t->dec);
+    int64_t ts = (int64_t)(to / t->tb);
+    int rc = av_seek_frame(t->fmt, t->idx, ts, AVSEEK_FLAG_BACKWARD);
+    if (rc < 0) rc = av_seek_frame(t->fmt, t->idx, ts, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_ANY);
+    if (rc < 0) rc = av_seek_frame(t->fmt, t->idx, 0, AVSEEK_FLAG_BACKWARD); /* au pire : depuis le début */
+    vlog("deplacement %.1f s : %s (%d)", to, rc >= 0 ? "ok" : "ECHEC", rc);
+    return rc >= 0;
 }
 
 /* Un seul thread à la fois dans les initialisations FFmpeg (pas de pthreads dans notre build) */
@@ -534,12 +640,19 @@ static bool setup_dims(int w, int h)
 }
 
 /* Met une image décodée dans la file (attend une place libre) */
-static void push_frame(Track *t)
+/* gen : demande de déplacement en cours de traitement ; skip_until : images antérieures jetées */
+static void push_frame(Track *t, int gen, double skip_until)
 {
     AVFrame *f = t->frm;
     int64_t ts = f->best_effort_timestamp != AV_NOPTS_VALUE ? f->best_effort_timestamp : f->pts;
     double pts = ts != AV_NOPTS_VALUE ? ts * t->tb : 0;
 
+    if (gen != s_seek_gen) return; /* déplacement demandé entre-temps : image périmée */
+    /* Après un déplacement : on décode depuis l'image clé précédente sans rien afficher */
+    if (pts < skip_until) {
+        t->dec->skip_frame = AVDISCARD_NONREF;
+        return;
+    }
     /* En retard sur le son : on jette l'image et on allège le décodage */
     if (s_status == VS_PLAYING && pts < s_clock_pub - 0.12) {
         t->dec->skip_frame = AVDISCARD_NONREF;
@@ -557,8 +670,8 @@ static void push_frame(Track *t)
     }
 
     LightLock_Lock(&s_vq_lock);
-    while (s_vq_n == VQ && !s_stop) CondVar_WaitTimeout(&s_vq_cv, &s_vq_lock, 20 * MS);
-    if (s_stop) { LightLock_Unlock(&s_vq_lock); return; }
+    while (s_vq_n == VQ && !s_stop && gen == s_seek_gen) CondVar_WaitTimeout(&s_vq_cv, &s_vq_lock, 20 * MS);
+    if (s_stop || gen != s_seek_gen) { LightLock_Unlock(&s_vq_lock); return; }
     int slot = (s_vq_r + s_vq_n) % VQ;
     LightLock_Unlock(&s_vq_lock);
 
@@ -569,8 +682,10 @@ static void push_frame(Track *t)
     }
 
     LightLock_Lock(&s_vq_lock);
-    s_vq_pts[slot] = pts;
-    s_vq_n++;
+    if (gen == s_seek_gen && s_vq_n < VQ && slot == (s_vq_r + s_vq_n) % VQ) {
+        s_vq_pts[slot] = pts;
+        s_vq_n++;
+    }
     LightLock_Unlock(&s_vq_lock);
 }
 
@@ -646,20 +761,45 @@ static void video_thread(void *arg)
     vlog("video %dx%d, texture %dx%d", t.dec->width, t.dec->height, s_tw, s_th);
     if (s_duration <= 0 && t.fmt->duration > 0) s_duration = t.fmt->duration / (double)AV_TIME_BASE;
 
+    /* Le thread reste actif après la fin du flux : un déplacement (retour en arrière, « Revoir »)
+     * reprend la lecture sans tout recharger. */
+    int gen = s_seek_gen;
+    s_vgen_ack = gen;
+    double skip_until = -1;
+    bool eof = false;
     while (!s_stop) {
+        if (gen != s_seek_gen) {
+            gen = s_seek_gen;
+            __sync_synchronize(); /* s_seek_to est écrit avant s_seek_gen */
+            double to = s_seek_to;
+            seek_track(&t, to);
+            t.dec->skip_frame = AVDISCARD_DEFAULT;
+            skip_until = to - 0.02;
+            eof = false;
+            s_vdone = false;
+            __sync_synchronize();
+            s_vgen_ack = gen;
+        }
+        if (eof) {
+            svcSleepThread(20 * MS);
+            continue;
+        }
         int r = av_read_frame(t.fmt, t.pkt);
         if (r < 0) {
             avcodec_send_packet(t.dec, NULL); /* vide le décodeur */
-            while (!s_stop && avcodec_receive_frame(t.dec, t.frm) == 0) push_frame(&t);
-            break;
+            while (!s_stop && avcodec_receive_frame(t.dec, t.frm) == 0) push_frame(&t, gen, skip_until);
+            vlog("video_thread : fin du flux");
+            eof = true;
+            if (gen == s_seek_gen) s_vdone = true;
+            continue;
         }
         if (t.pkt->stream_index == t.idx) {
             if (avcodec_send_packet(t.dec, t.pkt) >= 0)
-                while (!s_stop && avcodec_receive_frame(t.dec, t.frm) == 0) push_frame(&t);
+                while (!s_stop && gen == s_seek_gen && avcodec_receive_frame(t.dec, t.frm) == 0)
+                    push_frame(&t, gen, skip_until);
         }
         av_packet_unref(t.pkt);
     }
-    vlog("video_thread : fin du flux");
     track_close(&t);
     s_vdone = true;
     return;
@@ -741,7 +881,32 @@ static void audio_thread(void *arg)
     int cur = 0, fill = 0;
     double cur_pts = 0;
     bool eof = false;
-    while (!s_stop && !eof) {
+    int gen = s_seek_gen;
+    s_agen_ack = gen;
+    double skip_until = -1;
+    while (!s_stop) {
+        if (gen != s_seek_gen) {
+            /* déplacement : on vide les tampons du DSP et on repart de la nouvelle position */
+            gen = s_seek_gen;
+            __sync_synchronize();
+            double to = s_seek_to;
+            ndspChnWaveBufClear(CH);
+            svcSleepThread(5 * MS);
+            for (int i = 0; i < NBUF; i++) s_wb[i].status = NDSP_WBUF_DONE;
+            s_aqueued = 0;
+            cur = fill = 0;
+            seek_track(&t, to);
+            skip_until = to;
+            cur_pts = to;
+            eof = false;
+            s_adone = false;
+            __sync_synchronize();
+            s_agen_ack = gen;
+        }
+        if (eof) {
+            svcSleepThread(20 * MS);
+            continue;
+        }
         int r = av_read_frame(t.fmt, t.pkt);
         if (r < 0) {
             eof = true;
@@ -752,14 +917,23 @@ static void audio_thread(void *arg)
         }
         if (!eof) av_packet_unref(t.pkt);
 
-        while (!s_stop && avcodec_receive_frame(dc, t.frm) == 0) {
+        while (!s_stop && gen == s_seek_gen && avcodec_receive_frame(dc, t.frm) == 0) {
             AVFrame *f = t.frm;
             double fpts = f->pts != AV_NOPTS_VALUE ? f->pts * t.tb : cur_pts;
-            for (int i = 0; i < f->nb_samples && !s_stop; i++) {
+            int i0 = 0;
+            if (skip_until >= 0) { /* après un déplacement : échantillons avant la position demandée sautés */
+                double lead = (skip_until - fpts) * s_rate;
+                if (lead >= f->nb_samples) continue;
+                if (lead > 0) i0 = (int)lead;
+                skip_until = -1;
+            }
+            for (int i = i0; i < f->nb_samples && !s_stop && gen == s_seek_gen; i++) {
                 if (fill == 0) {
                     /* attend que le tampon soit rejoué */
-                    while (!s_stop && (s_wb[cur].status == NDSP_WBUF_QUEUED || s_wb[cur].status == NDSP_WBUF_PLAYING))
+                    while (!s_stop && gen == s_seek_gen &&
+                           (s_wb[cur].status == NDSP_WBUF_QUEUED || s_wb[cur].status == NDSP_WBUF_PLAYING))
                         svcSleepThread(3 * MS);
+                    if (gen != s_seek_gen) break;
                     cur_pts = fpts + (double)i / s_rate;
                 }
                 s16 l, rr;
@@ -790,8 +964,19 @@ static void audio_thread(void *arg)
                 }
             }
         }
+        if (eof && !s_stop && gen == s_seek_gen) {
+            /* fin du son : dernier tampon incomplet (après la fin du tampon précédent) */
+            while (!s_stop && gen == s_seek_gen && fill > 0 &&
+                   (s_wb[cur].status == NDSP_WBUF_QUEUED || s_wb[cur].status == NDSP_WBUF_PLAYING))
+                svcSleepThread(3 * MS);
+            if (!s_stop && gen == s_seek_gen && fill > 0) {
+                submit_buf(cur, fill, cur_pts);
+                cur = (cur + 1) % NBUF;
+                fill = 0;
+            }
+            if (gen == s_seek_gen) s_adone = true;
+        }
     }
-    if (!s_stop && fill > 0) submit_buf(cur, fill, cur_pts);
     track_close(&t);
     s_adone = true;
 }
@@ -801,6 +986,7 @@ static void audio_thread(void *arg)
 
 static double clock_now(void)
 {
+    if (s_seeking) return s_seek_to; /* repositionnement en cours : l'horloge attend */
     if (s_audio_state == 1) {
         for (int i = 0; i < NBUF; i++) {
             if (s_wb[i].status == NDSP_WBUF_PLAYING) {
@@ -810,10 +996,10 @@ static double clock_now(void)
         }
         return s_clock_last; /* entre deux tampons ou son en attente : l'horloge s'arrête */
     }
-    if (!s_wall_start) return 0;
+    if (!s_wall_start) return s_clock_base;
     u64 now = osGetTime();
     u64 paused = s_pause_acc + (s_status == VS_PAUSED && s_pause_start ? now - s_pause_start : 0);
-    return (now - s_wall_start - paused) / 1000.0;
+    return s_clock_base + (now - s_wall_start - paused) / 1000.0;
 }
 
 static bool audio_playing_or_queued(void)
@@ -844,6 +1030,10 @@ bool video_open(const char *video_id, int max_p, bool preload)
     s_vq_r = s_vq_n = 0;
     s_clock_pub = s_clock_last = 0;
     s_wall_start = s_pause_start = s_pause_acc = 0;
+    s_clock_base = 0;
+    s_seek_gen = s_vgen_ack = s_agen_ack = 0;
+    s_seek_to = 0;
+    s_seeking = s_seek_first = s_seek_paused = false;
     s_has_frame = false;
     LightLock_Init(&s_vq_lock);
     LightLock_Init(&s_ff_lock);
@@ -893,6 +1083,7 @@ void video_close(void)
     if (s_status == VS_IDLE && !s_vthread) return;
     vlog("video_close");
     s_stop = true;
+    s_vsrc.abort = s_asrc.abort = true; /* interrompt les téléchargements en cours */
     if (s_ndsp_ok) ndspChnWaveBufClear(CH);
     LightLock_Lock(&s_vq_lock);
     CondVar_Broadcast(&s_vq_cv);
@@ -959,34 +1150,49 @@ void video_frame(void)
     }
 
     /* Démarrage : première image prête et son en avance de quelques tampons */
+    /* (aussi après un déplacement : les threads doivent avoir accusé réception de la demande) */
     if (s_status == VS_LOADING) {
-        bool vready = s_vq_n > 0 || s_vdone;
-        bool aready = s_audio_state == 2 || (s_audio_state == 1 && (s_aqueued >= 3 || s_adone));
+        int gen = s_seek_gen;
+        bool vready = s_vgen_ack == gen && (s_vq_n > 0 || s_vdone);
+        bool aready = s_audio_state == 2 ||
+                      (s_audio_state == 1 && s_agen_ack == gen && (s_aqueued >= 3 || s_adone));
         if (vready && aready && s_tex_ok) {
-            if (s_audio_state == 1) ndspChnSetPaused(CH, false);
-            s_wall_start = osGetTime();
-            s_status = VS_PLAYING;
-            vlog("lecture demarree");
+            u64 now = osGetTime();
+            s_wall_start = now;
+            s_pause_acc = 0;
+            if (s_seeking && s_seek_paused) {
+                s_pause_start = now; /* repositionné, mais on reste en pause */
+                s_status = VS_PAUSED;
+            } else {
+                if (s_audio_state == 1) ndspChnSetPaused(CH, false);
+                s_pause_start = 0;
+                s_status = VS_PLAYING;
+            }
+            vlog(s_seeking ? "lecture reprise a %.1f s" : "lecture demarree (%.1f)", (double)s_seek_to);
+            s_clock_last = s_seek_to;
+            s_seeking = false;
         }
     }
 
     double clock = clock_now();
     s_clock_pub = (float)clock;
 
-    if (s_status == VS_PLAYING || (s_status == VS_LOADING && !s_has_frame)) {
+    bool first = !s_has_frame || s_seek_first; /* première image (ou première après un déplacement) */
+    if (s_status == VS_PLAYING || (s_status == VS_LOADING && !s_has_frame) || s_seek_first) {
         /* image la plus récente dont l'heure est venue (les plus anciennes sont sautées) */
         LightLock_Lock(&s_vq_lock);
         int chosen = -1;
-        while (s_vq_n > 0 && (s_vq_pts[s_vq_r] <= clock + 0.015 || !s_has_frame)) {
+        while (s_vq_n > 0 && (s_vq_pts[s_vq_r] <= clock + 0.015 || first)) {
             chosen = s_vq_r;
             s_vq_r = (s_vq_r + 1) % VQ;
             s_vq_n--;
-            if (!s_has_frame) break; /* toute première image : affichée tout de suite */
+            if (first) break; /* affichée tout de suite */
         }
         if (chosen >= 0 && s_tex_ok) {
             memcpy(s_tex.data, s_vq[chosen], (size_t)s_tw * s_th * 2);
             C3D_TexFlush(&s_tex);
             s_has_frame = true;
+            s_seek_first = false;
         }
         if (chosen >= 0) CondVar_Broadcast(&s_vq_cv);
         LightLock_Unlock(&s_vq_lock);
@@ -1042,6 +1248,7 @@ bool video_buffering(void)
 
 void video_toggle_pause(void)
 {
+    if (s_seeking) { s_seek_paused = !s_seek_paused; return; } /* appliqué une fois repositionné */
     if (s_status == VS_PLAYING) {
         if (s_audio_state == 1) ndspChnSetPaused(CH, true);
         s_pause_start = osGetTime();
@@ -1052,8 +1259,47 @@ void video_toggle_pause(void)
         s_pause_start = 0;
         s_status = VS_PLAYING;
     } else if (s_status == VS_ENDED) {
-        video_restart();
+        if (video_can_seek()) video_seek(0); /* « Revoir » sans retélécharger le début */
+        else video_restart();
     }
+}
+
+bool video_can_seek(void)
+{
+    VideoStatus st = s_status;
+    return s_vthread && s_dims_ready &&
+           (st == VS_PLAYING || st == VS_PAUSED || st == VS_ENDED || (st == VS_LOADING && s_seeking));
+}
+
+void video_seek(float to)
+{
+    if (!video_can_seek()) return;
+    if (s_duration > 0 && to > s_duration - 0.5f) to = (float)s_duration - 0.5f;
+    if (to < 0) to = 0;
+    bool paused = s_status == VS_PAUSED || (s_seeking && s_seek_paused);
+    if (s_audio_state == 1) ndspChnSetPaused(CH, true);
+
+    LightLock_Lock(&s_vq_lock);
+    s_seek_to = to;
+    s_seek_gen++;
+    s_vq_n = 0; /* images de l'ancienne position : jetées */
+    CondVar_Broadcast(&s_vq_cv);
+    LightLock_Unlock(&s_vq_lock);
+
+    s_clock_last = s_clock_base = to;
+    s_clock_pub = to;
+    s_seek_paused = paused;
+    s_seek_first = true;
+    s_seeking = true;
+    s_open_ms = osGetTime(); /* délai de chargement compté à partir d'ici */
+    s_status = VS_LOADING;
+    vlog("demande de deplacement : %.1f s", (double)to);
+}
+
+void video_seek_by(float delta)
+{
+    float base = s_seeking ? s_seek_to : (float)s_clock_pub;
+    video_seek(base + delta);
 }
 
 void video_restart(void)
@@ -1080,3 +1326,6 @@ void video_exit(void)
     if (s_ndsp_ok) ndspExit();
     s_ndsp_ok = false;
 }
+
+bool video_seeking(void) { return s_seeking; }
+bool video_seek_paused(void) { return s_seeking && s_seek_paused; }

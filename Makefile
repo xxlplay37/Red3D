@@ -1,7 +1,7 @@
 #---------------------------------------------------------------------------------
 # Reddit3DS — Makefile devkitARM
-#   make        -> Reddit3DS.3dsx
-#   make cia    -> Reddit3DS.cia   (nécessite makerom dans le PATH)
+#   make        -> Red3DS.3dsx
+#   make cia    -> Red3DS.cia      (nécessite makerom dans le PATH)
 #---------------------------------------------------------------------------------
 .SUFFIXES:
 
@@ -13,7 +13,7 @@ TOPDIR ?= $(CURDIR)
 include $(DEVKITARM)/3ds_rules
 
 #---------------------------------------------------------------------------------
-TARGET          := Reddit3DS
+TARGET          := Red3DS
 BUILD           := build
 SOURCES         := source
 INCLUDES        := source
@@ -35,6 +35,9 @@ ARCH     := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
 CFLAGS   := -g -Wall -O2 -mword-relocations -ffunction-sections -std=gnu11 $(ARCH)
 CFLAGS   += $(INCLUDE) -D__3DS__
+# Date de compilation affichée dans les paramètres (fournie par build.sh)
+BUILD_STAMP ?= dev
+CFLAGS   += '-DBUILD_STAMP="$(BUILD_STAMP)"'
 ASFLAGS  := -g $(ARCH)
 LDFLAGS   = -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,-z,noexecstack
 

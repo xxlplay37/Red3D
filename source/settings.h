@@ -13,6 +13,10 @@ enum { TL_FR, TL_EN, TL_ES, TL_DE, TL_IT, TL_PT, TL_LANGS };
 enum { VQ_AUTO, VQ_220, VQ_270, VQ_360, VIDEO_QUALITIES };
 enum { VM_DIRECT, VM_PRELOAD, VIDEO_MODES };
 enum { IQ_NORMAL, IQ_HIGH, IQ_MAX, IMG_QUALITIES };   /* qualité des images */
+enum { HOME_SUGGEST, HOME_SUBS, HOME_BOTH, HOME_MODES };   /* contenu du fil d'accueil */
+enum { SUG_LANG, SUG_GAMING, SUG_NINTENDO, SUG_TECH, SUG_SCIENCE, SUG_NEWS, SUG_FUN, SUG_OFF, SUG_THEMES };
+#define MAX_SUBS 40                                    /* abonnements locaux */
+#define NSUGGEST 8                                     /* suggestions par thème */
 #define COM_BATCHES 5                                  /* 4, 8, 12, 20, tous */   /* lecture en flux / après chargement complet */
 
 typedef struct {
@@ -30,9 +34,13 @@ typedef struct {
     int video_mode;     /* VM_DIRECT : en flux, VM_PRELOAD : démarre une fois tout chargé */
     char start_sub[64]; /* "" = fil d'accueil */
     char recent[700];   /* subreddits récents, séparés par des virgules */
+    int home_mode;      /* HOME_* : suggestions, abonnements ou les deux */
+    int sug_theme;      /* SUG_* : thème des suggestions (accueil, onglet Subs) */
+    char subs[1200];    /* abonnements locaux, séparés par des virgules */
     /* conservés tels quels (édition manuelle du fichier) */
     char client_id[64];
     char redlib[1024];
+    char redlib_server[64]; /* instance Redlib imposée ("" = automatique) */
 } Settings;
 
 extern Settings g_cfg;
@@ -45,8 +53,19 @@ int  settings_recent(char out[][64], int max);
 /* Applique les réglages réseau à reddit.c */
 void settings_apply_source(void);
 
-/* Multi-subreddit du fil d'accueil selon la langue du contenu */
+/* Multi-subreddit du fil d'accueil (suggestions, abonnements ou les deux) */
 const char *settings_home_feed(void);
+const char *settings_home_mode_name(int m);
+
+/* Suggestions du thème choisi (0 si désactivées) */
+int settings_suggestions(const char *out[], int max);
+const char *settings_sug_name(int theme);
+
+/* Abonnements locaux */
+int  settings_subs(char out[][64], int max);
+bool settings_is_sub(const char *sub);
+/* Abonne ou désabonne ; renvoie le nouvel état (vrai = abonné). Faux aussi si la liste est pleine. */
+bool settings_toggle_sub(const char *sub);
 const char *settings_content_lang_name(int cl);
 const char *settings_content_lang_code(int cl);
 const char *settings_tr_code(int tl);

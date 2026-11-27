@@ -482,6 +482,13 @@ void ui_icon_up(float x, float y, float s, u32 c)
     C2D_DrawRectSolid(x + s * 0.32f, y + s * 0.5f, 0.5f, s * 0.36f, s * 0.5f, c);
 }
 
+void ui_icon_down(float x, float y, float s, u32 c)
+{
+    /* flèche vers le bas : tige + triangle */
+    C2D_DrawRectSolid(x + s * 0.32f, y, 0.5f, s * 0.36f, s * 0.5f, c);
+    C2D_DrawTriangle(x + s / 2, y + s, c, x, y + s * 0.45f, c, x + s, y + s * 0.45f, c, 0.5f);
+}
+
 void ui_icon_comment(float x, float y, float s, u32 c)
 {
     ui_rrect(x, y, s, s * 0.72f, s * 0.2f, c);

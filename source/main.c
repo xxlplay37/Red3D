@@ -32,6 +32,9 @@
 u32 __stacksize__ = 0x40000;
 
 #define APP_VERSION "2.1"
+#ifndef BUILD_STAMP
+#define BUILD_STAMP "dev"
+#endif
 
 #define TOP_W   400.0f
 #define BOT_W   320.0f
@@ -46,12 +49,13 @@ u32 __stacksize__ = 0x40000;
 #define THUMB   64.0f
 #define BODY_IMG_H 168.0f
 
-typedef enum { SCR_FEED, SCR_POST, SCR_IMAGE, SCR_SEARCH, SCR_SETTINGS, SCR_VIDEO } Screen;
+typedef enum { SCR_FEED, SCR_POST, SCR_IMAGE, SCR_SEARCH, SCR_SETTINGS, SCR_VIDEO, SCR_SERVERS } Screen;
 
 typedef enum {
     ACT_NONE, ACT_SEARCH, ACT_SORT_NEXT, ACT_SORT_PREV, ACT_REFRESH, ACT_OPEN, ACT_BACK,
     ACT_VIEW, ACT_ZOOM_IN, ACT_ZOOM_OUT, ACT_ZOOM_RESET, ACT_SETTINGS,
     ACT_SET_PREV, ACT_SET_NEXT, ACT_SET_ACTIVATE, ACT_TRANSLATE, ACT_VIDEO_PLAY, ACT_VOL_UP, ACT_VOL_DOWN,
+    ACT_SEEK_BACK, ACT_SEEK_FWD, ACT_SRV_TEST, ACT_SRV_USE, ACT_SRV_AUTO, ACT_SUBSCRIBE,
 } Action;
 
 static const char *SORTS[] = { "hot", "new", "top", "rising" };
@@ -92,6 +96,12 @@ static int   g_info_for = -2;
 static char  g_status[256];
 static u32   g_more_retry; /* frame avant laquelle on ne relance pas « charger plus » */
 
+/* Accueil : rangée « abonnements + suggestions » au-dessus des posts (g_sel == -1 quand elle est sélectionnée) */
+#define STRIP_H 30.0f
+static char  g_chips[MAX_SUBS + NSUGGEST][64];
+static int   g_nchips, g_nchip_subs, g_chip_sel;
+static float g_chip_scroll, g_chip_to;
+
 /* Post */
 static int   g_post;
 static char  g_post_id[16];
@@ -113,7 +123,7 @@ static float g_zoom = 1, g_pan_x, g_pan_y;
 static Screen g_view_back = SCR_POST;
 static Screen g_video_back = SCR_POST;
 /* Recherche (onglet Subs) */
-enum { SC_GOTO, SC_RESULT, SC_RECENT, SC_SUGGEST };
+enum { SC_GOTO, SC_RESULT, SC_SUB, SC_RECENT, SC_SUGGEST };
 typedef struct { Doc desc; float y, h; int kind, idx; const char *section; } SubCard;
 static char   g_query[96];
 static char   g_last_q[96];   /* dernière requête envoyée */
@@ -129,8 +139,8 @@ static char   g_recent[10][64];
 static int    g_nrecent;
 
 /* Paramètres */
-enum { SET_UI_LANG, SET_CONTENT, SET_SORT, SET_START, SET_NSFW, SET_IMAGES, SET_IMGQ, SET_TEXT, SET_TRANSLATE,
-       SET_VIDEO, SET_VMODE, SET_COMBATCH, SET_SOURCE, SET_CLEAR, SET_COUNT };
+enum { SET_UI_LANG, SET_CONTENT, SET_HOME, SET_SUGGEST, SET_SORT, SET_START, SET_NSFW, SET_IMAGES, SET_IMGQ, SET_TEXT, SET_TRANSLATE,
+       SET_VIDEO, SET_VMODE, SET_COMBATCH, SET_SOURCE, SET_SERVER, SET_STATUS, SET_CLEAR, SET_COUNT };
 #define SET_ROW_H 36.0f
 static int    g_set_sel;
 static float  g_set_scroll, g_set_to;
@@ -138,6 +148,19 @@ static Screen g_set_back = SCR_FEED;
 static bool   g_set_dirty, g_set_reload;
 static Doc    g_set_help;
 static int    g_set_help_for = -2;
+
+/* Serveurs Redlib (écran de statut) */
+#define SRV_ROW_H 34.0f
+static InstStatus g_srv[REDDIT_MAX_INSTANCES];
+static int    g_nsrv, g_srv_sel;
+static float  g_srv_scroll, g_srv_to;
+static Screen g_srv_back = SCR_SETTINGS;
+
+/* Vidéo : barre de progression tactile (position mémorisée au dessin) */
+static float  g_vbar_x, g_vbar_y = -100, g_vbar_w;
+static bool   g_scrubbing;
+static float  g_scrub_k;
+static float  g_vrow_y = -100; /* rangée de boutons volume / zoom (un toucher n'y met pas en pause) */
 
 /* ------------------------------------------------------------------ */
 /* Formatage                                                          */
@@ -149,6 +172,27 @@ static void fmt_num(char *o, size_t n, int v)
     else if (a >= 10000) snprintf(o, n, "%dk", v / 1000);
     else if (a >= 1000)  snprintf(o, n, "%.1fk", v / 1000.0);
     else                 snprintf(o, n, "%d", v);
+}
+
+/* Votes négatifs estimés (score + ratio) : faux si le ratio du post est inconnu */
+static bool post_downvotes(const Post *p, int *downs, int *pct)
+{
+    int up, down;
+    if (!p || !reddit_estimate_votes(p->score, p->ratio, &up, &down)) return false;
+    if (downs) *downs = down;
+    if (pct) *pct = (int)(p->ratio * 100 + 0.5f);
+    return true;
+}
+
+/* " · ▼ 412 (98 % positifs)" sous forme de texte, "" si inconnu */
+static void fmt_votes_line(const Post *p, char *o, size_t n)
+{
+    int down, pct;
+    o[0] = '\0';
+    if (!post_downvotes(p, &down, &pct)) return;
+    char d[16];
+    fmt_num(d, sizeof(d), down);
+    snprintf(o, n, TR("~%s votes négatifs · %d %% positifs", "~%s downvotes · %d %% upvoted"), d, pct);
 }
 
 static void fmt_age(char *o, size_t n, double created)
@@ -230,6 +274,10 @@ static void feed_title(char *o, size_t n)
 {
     if (g_sub[0]) {
         snprintf(o, n, "r/%s", g_sub);
+    } else if (g_cfg.home_mode == HOME_SUBS && g_cfg.subs[0]) {
+        snprintf(o, n, "%s", TR("Abonnements", "Subscriptions"));
+    } else if (g_cfg.sug_theme > SUG_LANG && g_cfg.sug_theme < SUG_OFF && !(g_cfg.home_mode == HOME_SUBS && g_cfg.subs[0])) {
+        snprintf(o, n, "%s · %s", TR("Accueil", "Home"), settings_sug_name(g_cfg.sug_theme));
     } else {
         const char *code = settings_content_lang_code(g_cfg.content_lang);
         snprintf(o, n, "%s%s%s", TR("Accueil", "Home"), code[0] ? " · " : "", code);
@@ -341,13 +389,40 @@ static void free_cards(void)
     g_ncards = 0;
 }
 
+static bool home_strip(void)
+{
+    return !g_sub[0] && g_nchips > 0;
+}
+
+/* Abonnements puis suggestions du thème choisi (sans doublon) */
+static void build_chips(void)
+{
+    g_nchips = g_nchip_subs = 0;
+    if (g_sub[0]) return;
+    char subs[MAX_SUBS][64];
+    int ns = settings_subs(subs, MAX_SUBS);
+    for (int i = 0; i < ns; i++) snprintf(g_chips[g_nchips++], 64, "%.63s", subs[i]);
+    g_nchip_subs = g_nchips;
+    const char *sg[NSUGGEST];
+    int n = settings_suggestions(sg, NSUGGEST);
+    for (int i = 0; i < n && g_nchips < MAX_SUBS + NSUGGEST; i++) {
+        bool dup = false;
+        for (int k = 0; k < g_nchip_subs; k++)
+            if (!strcasecmp(g_chips[k], sg[i])) dup = true;
+        if (!dup) snprintf(g_chips[g_nchips++], 64, "%.63s", sg[i]);
+    }
+    if (g_chip_sel >= g_nchips) g_chip_sel = 0;
+}
+
 static void build_cards(void)
 {
     free_cards();
+    build_chips();
     g_cards = calloc(g_feed.n ? g_feed.n : 1, sizeof(Card));
     if (!g_cards) return;
     g_ncards = g_feed.n;
     float y = HEAD_H + 6;
+    if (home_strip()) y += STRIP_H + 6;
     for (int i = 0; i < g_feed.n; i++) {
         const Post *p = &g_feed.items[i];
         Card *c = &g_cards[i];
@@ -376,7 +451,10 @@ static int feed_items(void)
 static void feed_ensure_visible(void)
 {
     float top, bot;
-    if (g_sel < g_ncards) {
+    if (g_sel < 0) {
+        top = HEAD_H + 6;
+        bot = top + STRIP_H;
+    } else if (g_sel < g_ncards) {
         top = g_cards[g_sel].y;
         bot = top + g_cards[g_sel].h;
     } else {
@@ -396,7 +474,8 @@ static void feed_move(int d)
     int n = feed_items();
     if (n == 0) return;
     int s = g_sel + d;
-    if (s < 0) s = 0;
+    int lo = home_strip() ? -1 : 0; /* -1 : rangée des suggestions */
+    if (s < lo) s = lo;
     if (s >= n) s = n - 1;
     if (s != g_sel) {
         g_sel = s;
@@ -426,6 +505,8 @@ static void build_info_doc(void)
     snprintf(line, sizeof(line), TR("%s points · %d commentaires", "%s points · %d comments"),
              score, p->ncomments);
     doc_text(&g_info, line, 0.4f, x, w, COL_ACCENT2, 0);
+    fmt_votes_line(p, line, sizeof(line));
+    if (line[0]) doc_text(&g_info, line, 0.4f, x, w, COL_LINK, 0);
     if (!has_media(p)) {
         if (!p->is_self && p->url[0]) {
             doc_space(&g_info, 4);
@@ -488,6 +569,8 @@ static void build_body(bool keep)
     snprintf(line, sizeof(line), TR("%s points · %d commentaires%s%s%s", "%s points · %d comments%s%s%s"),
              score, p->ncomments, p->flair[0] ? " · " : "", p->flair, p->nsfw ? " · NSFW" : "");
     doc_text(&g_body, line, 0.42f, x, w, COL_ACCENT2, 0);
+    fmt_votes_line(p, line, sizeof(line));
+    if (line[0]) doc_text(&g_body, line, 0.42f, x, w, COL_LINK, 0);
     doc_space(&g_body, 8);
 
     if (has_media(p) || p->video_id[0]) {
@@ -601,18 +684,11 @@ static void com_show_more(void)
 #define SBAR_Y  (HEAD_H + 6)
 #define SBAR_H  30.0f
 #define LIST_Y  (SBAR_Y + SBAR_H + 8)
-#define NSUGGEST 8
-
-/* Suggestions quand la barre est vide, selon la langue du contenu */
-static const char *SUGGEST[CONTENT_LANGS][NSUGGEST] = {
-    [CL_ALL] = { "AskReddit", "worldnews", "gaming", "pics", "movies", "todayilearned", "3DS", "Nintendo" },
-    [CL_FR]  = { "france", "AskFrance", "jeuxvideo", "Quebec", "belgium", "programmation", "3DS", "Nintendo" },
-    [CL_EN]  = { "AskReddit", "worldnews", "gaming", "todayilearned", "technology", "movies", "3DS", "Nintendo" },
-    [CL_ES]  = { "es", "spain", "mexico", "argentina", "chile", "colombia", "3DS", "Nintendo" },
-    [CL_DE]  = { "de", "germany", "Austria", "Switzerland", "Finanzen", "FragReddit", "3DS", "Nintendo" },
-    [CL_IT]  = { "italy", "Italia", "italygames", "ItaliaPersonalFinance", "ItalyInformatica", "3DS", "Nintendo", "gaming" },
-    [CL_PT]  = { "brasil", "portugal", "desabafos", "futebol", "investimentos", "3DS", "Nintendo", "gaming" },
-};
+/* Abonnements et suggestions (thème choisi dans les paramètres), affichés quand la barre est vide */
+static char        g_mysubs[MAX_SUBS][64];
+static int         g_nmysubs;
+static const char *g_sugg[NSUGGEST];
+static int         g_nsugg;
 
 static void free_scards(void)
 {
@@ -635,8 +711,9 @@ static const char *scard_name(const SubCard *c)
     switch (c->kind) {
     case SC_GOTO:   return query_as_sub();
     case SC_RESULT: return g_subs.items[c->idx].name;
+    case SC_SUB:    return g_mysubs[c->idx];
     case SC_RECENT: return g_recent[c->idx];
-    default:        return SUGGEST[g_cfg.content_lang][c->idx];
+    default:        return g_sugg[c->idx];
     }
 }
 
@@ -663,13 +740,17 @@ static void build_search_cards(void)
 {
     free_scards();
     g_nrecent = settings_recent(g_recent, 10);
-    g_scards = calloc(g_nrecent + NSUGGEST + g_subs.n + 2, sizeof(SubCard));
+    g_nmysubs = settings_subs(g_mysubs, MAX_SUBS);
+    g_nsugg = settings_suggestions(g_sugg, NSUGGEST);
+    g_scards = calloc(g_nmysubs + g_nrecent + g_nsugg + g_subs.n + 2, sizeof(SubCard));
     if (!g_scards) return;
     float y = LIST_Y;
     if (!g_query[0]) {
+        for (int i = 0; i < g_nmysubs; i++)
+            add_scard(&y, SC_SUB, i, i == 0 ? TR("Abonnements", "Subscriptions") : NULL);
         for (int i = 0; i < g_nrecent; i++)
             add_scard(&y, SC_RECENT, i, i == 0 ? TR("Récents", "Recent") : NULL);
-        for (int i = 0; i < NSUGGEST; i++)
+        for (int i = 0; i < g_nsugg; i++)
             add_scard(&y, SC_SUGGEST, i, i == 0 ? TR("Suggestions", "Suggestions") : NULL);
     } else {
         if (query_as_sub()[0]) add_scard(&y, SC_GOTO, 0, NULL);
@@ -791,7 +872,7 @@ static void rebuild_all(void)
     int sel = g_sel;
     float sc = g_scroll, st = g_scroll_to;
     build_cards();
-    g_sel = sel < feed_items() ? sel : 0;
+    g_sel = (sel < feed_items() && (sel >= 0 || home_strip())) ? sel : 0;
     g_scroll = sc;
     g_scroll_to = st;
     feed_ensure_visible();
@@ -813,6 +894,8 @@ static const char *set_label(int i)
     switch (i) {
     case SET_UI_LANG: return TR("Langue de l'interface", "Interface language");
     case SET_CONTENT: return TR("Langue du contenu", "Content language");
+    case SET_HOME:    return TR("Fil d'accueil", "Home feed");
+    case SET_SUGGEST: return TR("Suggestions", "Suggestions");
     case SET_SORT:    return TR("Tri par défaut", "Default sort");
     case SET_START:   return TR("Au démarrage", "On startup");
     case SET_NSFW:    return TR("Contenu NSFW", "NSFW content");
@@ -824,6 +907,8 @@ static const char *set_label(int i)
     case SET_VMODE: return TR("Lecture vidéo", "Video playback");
     case SET_COMBATCH: return TR("Commentaires par lot", "Comments per batch");
     case SET_SOURCE:  return TR("Source des données", "Data source");
+    case SET_SERVER:  return TR("Serveur Redlib", "Redlib server");
+    case SET_STATUS:  return TR("Statut des serveurs", "Server status");
     case SET_CLEAR:   return TR("Vider le cache d'images", "Clear image cache");
     }
     return "";
@@ -834,6 +919,14 @@ static void set_value(int i, char *o, size_t n)
     switch (i) {
     case SET_UI_LANG: snprintf(o, n, "%s", g_cfg.ui_lang == LANG_EN ? "English" : "Français"); break;
     case SET_CONTENT: snprintf(o, n, "%s", settings_content_lang_name(g_cfg.content_lang)); break;
+    case SET_HOME: {
+        char subs[MAX_SUBS][64];
+        int ns = settings_subs(subs, MAX_SUBS);
+        if (g_cfg.home_mode == HOME_SUGGEST) snprintf(o, n, "%s", settings_home_mode_name(g_cfg.home_mode));
+        else snprintf(o, n, "%s (%d)", settings_home_mode_name(g_cfg.home_mode), ns);
+        break;
+    }
+    case SET_SUGGEST: snprintf(o, n, "%s", settings_sug_name(g_cfg.sug_theme)); break;
     case SET_SORT:    snprintf(o, n, "%s", sort_label(g_cfg.default_sort)); break;
     case SET_START:
         if (g_cfg.start_sub[0]) snprintf(o, n, "r/%s", g_cfg.start_sub);
@@ -876,6 +969,10 @@ static void set_value(int i, char *o, size_t n)
         snprintf(o, n, "%s", v[g_cfg.source]);
         break;
     }
+    case SET_SERVER:
+        snprintf(o, n, "%s", g_cfg.redlib_server[0] ? g_cfg.redlib_server : TR("Automatique", "Automatic"));
+        break;
+    case SET_STATUS: snprintf(o, n, "%s", BTN_A); break;
     case SET_CLEAR: snprintf(o, n, "%s", BTN_A); break;
     default: o[0] = '\0';
     }
@@ -894,6 +991,22 @@ static const char *set_help(int i)
                   "The home feed gathers the main subreddits in this language. "
                   "\"Everything\" shows r/popular (mostly English). Reddit offers no "
                   "translation: posts stay in their original language.");
+    case SET_HOME:
+        return TR("Ce que montre l'accueil. Suggestions : les subreddits du thème choisi juste en dessous (ou les "
+                  "grands subreddits de ta langue). Abonnements : uniquement les subreddits auxquels tu es abonné "
+                  "(bouton « + Abo. » en bas d'un subreddit ; ils restent sur la console, sans compte). Les deux : "
+                  "abonnements et suggestions mélangés. Sans abonnement, les suggestions sont utilisées.",
+                  "What the home feed shows. Suggestions: the subreddits of the theme chosen just below (or the "
+                  "main subreddits of your language). Subscriptions: only the subreddits you joined (\"+ Join\" "
+                  "button at the bottom of a subreddit; stored on the console, no account). Both: subscriptions "
+                  "and suggestions mixed. Without subscriptions, suggestions are used.");
+    case SET_SUGGEST:
+        return TR("Thème des suggestions affichées en haut de l'accueil et dans l'onglet Subs : selon la langue "
+                  "du contenu, jeux vidéo, Nintendo / 3DS, tech, science, actualités, humour, ou désactivées. "
+                  "Tes abonnements apparaissent toujours en premier.",
+                  "Theme of the suggestions shown at the top of the home feed and in the Subs tab: by content "
+                  "language, video games, Nintendo / 3DS, tech, science, news, humour, or off. "
+                  "Your subscriptions always come first.");
     case SET_SORT:
         return TR("Tri utilisé au lancement et à l'ouverture d'un subreddit. "
                   "Change-le à tout moment avec L / R.",
@@ -946,15 +1059,30 @@ static const char *set_help(int i)
                   "then played without any interruption. It takes longer before it starts.");
     case SET_SOURCE:
         return TR("Auto : Redlib (en direct), puis l'archive Arctic Shift si Redlib ne répond pas. "
-                  "Les instances Redlib se règlent dans config.ini.",
+                  "Le serveur Redlib se choisit juste en dessous ; la liste complète se règle dans config.ini.",
                   "Auto: Redlib (live), then the Arctic Shift archive if Redlib doesn't respond. "
-                  "Redlib instances are set in config.ini.");
+                  "Pick the Redlib server just below; the full list is set in config.ini.");
+    case SET_SERVER:
+        return TR("Automatique : les serveurs Redlib sont essayés l'un après l'autre, en commençant par le dernier "
+                  "qui a marché. Sinon, seul le serveur choisi est utilisé (puis l'archive si la source est « Auto »). "
+                  "Ouvre « Statut des serveurs » pour voir lesquels répondent.",
+                  "Automatic: Redlib servers are tried one after another, starting with the last one that worked. "
+                  "Otherwise only the chosen server is used (then the archive if the source is \"Auto\"). "
+                  "Open \"Server status\" to see which ones respond.");
+    case SET_STATUS:
+        return TR("Teste chaque serveur Redlib (chargement de r/popular) : temps de réponse, et s'il est bloqué "
+                  "(anti-robot, trop de requêtes) ou hors ligne. Tu peux y choisir le serveur à utiliser.",
+                  "Tests each Redlib server (loads r/popular): response time, and whether it is blocked "
+                  "(anti-bot, too many requests) or offline. You can pick the server to use there.");
     case SET_CLEAR:
         return TR("Libère la mémoire utilisée par les images déjà chargées.",
                   "Frees the memory used by images already loaded.");
     }
     return "";
 }
+
+static void open_servers(void);
+static int  srv_pref_index(void);
 
 static int cycle(int v, int d, int n)
 {
@@ -971,6 +1099,16 @@ static void set_change(int i, int d)
     case SET_CONTENT:
         g_cfg.content_lang = cycle(g_cfg.content_lang, d, CONTENT_LANGS);
         if (!g_sub[0]) g_set_reload = true;
+        break;
+    case SET_HOME:
+        g_cfg.home_mode = cycle(g_cfg.home_mode, d == 0 ? 1 : d, HOME_MODES);
+        if (!g_sub[0]) g_set_reload = true;
+        break;
+    case SET_SUGGEST:
+        g_cfg.sug_theme = cycle(g_cfg.sug_theme, d == 0 ? 1 : d, SUG_THEMES);
+        if (!g_sub[0]) g_set_reload = true;
+        build_cards(); /* rangée de l'accueil */
+        if (g_sel < 0 && !home_strip()) g_sel = 0;
         break;
     case SET_SORT:
         g_cfg.default_sort = cycle(g_cfg.default_sort, d, NSORTS);
@@ -1021,6 +1159,18 @@ static void set_change(int i, int d)
         settings_apply_source();
         g_set_reload = true;
         break;
+    case SET_SERVER: {
+        int n = reddit_instance_count();
+        int v = cycle(srv_pref_index() + 1, d == 0 ? 1 : d, n + 1) - 1; /* -1 = automatique */
+        if (v < 0) g_cfg.redlib_server[0] = '\0';
+        else snprintf(g_cfg.redlib_server, sizeof(g_cfg.redlib_server), "%s", reddit_instance(v));
+        settings_apply_source();
+        g_set_reload = true;
+        break;
+    }
+    case SET_STATUS:
+        open_servers();
+        return;
     case SET_CLEAR:
         if (g_online) img_drop_all();
         ui_toast(TR("Cache d'images vidé", "Image cache cleared"));
@@ -1045,6 +1195,93 @@ static void open_settings(void)
     g_set_dirty = g_set_reload = false;
     g_set_help_for = -2;
     g_screen = SCR_SETTINGS;
+}
+
+/* ------------------------------------------------------------------ */
+/* Serveurs Redlib : choix et statut                                  */
+
+/* Index du serveur imposé dans la liste, -1 = automatique */
+static int srv_pref_index(void)
+{
+    if (!g_cfg.redlib_server[0]) return -1;
+    for (int i = 0; i < reddit_instance_count(); i++)
+        if (!strcasecmp(reddit_instance(i), g_cfg.redlib_server)) return i;
+    return -1;
+}
+
+static void srv_reset_list(void)
+{
+    g_nsrv = reddit_instance_count();
+    if (g_nsrv > REDDIT_MAX_INSTANCES) g_nsrv = REDDIT_MAX_INSTANCES;
+    for (int i = 0; i < g_nsrv; i++) {
+        memset(&g_srv[i], 0, sizeof(g_srv[i]));
+        snprintf(g_srv[i].host, sizeof(g_srv[i].host), "%s", reddit_instance(i));
+    }
+    if (g_srv_sel >= g_nsrv) g_srv_sel = 0;
+}
+
+/* Récupère les résultats déjà prêts (pendant ou après le test) */
+static void srv_collect(Job *j)
+{
+    int pg = j->progress;
+    __sync_synchronize();
+    for (int i = 0; i < pg && i < REDDIT_MAX_INSTANCES && i < g_nsrv; i++)
+        if (!strcmp(j->stat[i].host, g_srv[i].host)) g_srv[i] = j->stat[i];
+}
+
+static void srv_start_test(void)
+{
+    srv_reset_list();
+    if (!g_online) {
+        ui_toast(TR("Réseau indisponible", "Network unavailable"));
+        return;
+    }
+    Job j;
+    memset(&j, 0, sizeof(j));
+    j.type = JOB_STATUS;
+    submit(&j);
+}
+
+static void open_servers(void)
+{
+    g_srv_back = g_screen;
+    g_screen = SCR_SERVERS;
+    int p = srv_pref_index();
+    g_srv_sel = p >= 0 ? p : 0;
+    g_srv_scroll = g_srv_to = 0;
+    srv_start_test();
+}
+
+static void close_servers(void)
+{
+    if (loading(JOB_STATUS, -1)) {
+        job_cancel();
+        drop_pending();
+    }
+    g_screen = g_srv_back;
+    g_set_help_for = -2;
+}
+
+/* i < 0 : retour au choix automatique */
+static void srv_use(int i)
+{
+    if (i < 0 || i >= g_nsrv) g_cfg.redlib_server[0] = '\0';
+    else snprintf(g_cfg.redlib_server, sizeof(g_cfg.redlib_server), "%s", g_srv[i].host);
+    settings_apply_source();
+    g_set_dirty = g_set_reload = true; /* enregistré et fil rechargé en quittant les paramètres */
+    g_set_help_for = -2;
+    char msg[96];
+    if (g_cfg.redlib_server[0]) snprintf(msg, sizeof(msg), TR("Serveur : %s", "Server: %s"), g_cfg.redlib_server);
+    else snprintf(msg, sizeof(msg), "%s", TR("Serveur : automatique", "Server: automatic"));
+    ui_toast(msg);
+}
+
+static void srv_ensure_visible(void)
+{
+    float top = HEAD_H + 6 + g_srv_sel * (SRV_ROW_H + 4);
+    if (top - 6 < g_srv_to + HEAD_H) g_srv_to = top - 6 - HEAD_H;
+    if (top + SRV_ROW_H + 6 > g_srv_to + SCR_H) g_srv_to = top + SRV_ROW_H + 6 - SCR_H;
+    clamp_scroll(&g_srv_to, HEAD_H + 6 + g_nsrv * (SRV_ROW_H + 4) + 6, SCR_H);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1163,6 +1400,9 @@ static void open_video(void)
     g_video_back = g_screen;
     g_screen = SCR_VIDEO;
     g_vid_tab = 0;
+    g_zoom = 1; /* même zoom que la visionneuse d'images */
+    g_pan_x = g_pan_y = 0;
+    g_scrubbing = false;
     if (!video_open(p->video_id, settings_video_maxp(), g_cfg.video_mode == VM_PRELOAD))
         ui_toast(video_error());
 }
@@ -1194,6 +1434,20 @@ static void open_feed(const char *name) /* "" = fil d'accueil */
     build_cards();
     request_feed(false);
     g_screen = SCR_FEED;
+}
+
+/* Abonnement local (enregistré dans config.ini) */
+static void toggle_subscription(const char *sub)
+{
+    if (!sub || !*sub || strchr(sub, '+')) return;
+    bool was = settings_is_sub(sub);
+    bool now = settings_toggle_sub(sub);
+    char msg[96];
+    if (!was && !now) snprintf(msg, sizeof(msg), TR("Liste d'abonnements pleine (%d max)", "Subscription list full (%d max)"), MAX_SUBS);
+    else if (now) snprintf(msg, sizeof(msg), TR("Abonné à r/%s", "Joined r/%s"), sub);
+    else snprintf(msg, sizeof(msg), TR("Désabonné de r/%s", "Left r/%s"), sub);
+    ui_toast(msg);
+    if (was != now && !settings_save()) ui_toast(TR("Impossible d'enregistrer config.ini", "Couldn't save config.ini"));
 }
 
 static void change_sort(int d)
@@ -1247,7 +1501,8 @@ static void do_action(Action a)
         break;
     case ACT_OPEN:
         if (g_screen == SCR_FEED) {
-            if (g_sel < g_feed.n) open_post(g_sel);
+            if (g_sel < 0 && home_strip()) open_feed(g_chips[g_chip_sel]);
+            else if (g_sel >= 0 && g_sel < g_feed.n) open_post(g_sel);
             else if (g_feed.after[0] && !loading(JOB_FEED, -1)) request_feed(true);
         } else if (g_screen == SCR_SEARCH) {
             if (g_s_sel >= 0 && g_s_sel < g_nscards) {
@@ -1258,7 +1513,9 @@ static void do_action(Action a)
         }
         break;
     case ACT_BACK:
-        if (g_screen == SCR_VIDEO) {
+        if (g_screen == SCR_SERVERS) {
+            close_servers();
+        } else if (g_screen == SCR_VIDEO) {
             close_video();
         } else if (g_screen == SCR_IMAGE) {
             close_viewer();
@@ -1291,6 +1548,12 @@ static void do_action(Action a)
         break;
     case ACT_VOL_UP: video_set_volume(video_volume() + 0.1f); break;
     case ACT_VOL_DOWN: video_set_volume(video_volume() - 0.1f); break;
+    case ACT_SEEK_BACK: video_seek_by(-5); break;
+    case ACT_SEEK_FWD: video_seek_by(+5); break;
+    case ACT_SRV_TEST: srv_start_test(); break;
+    case ACT_SRV_USE: srv_use(g_srv_sel); break;
+    case ACT_SRV_AUTO: srv_use(-1); break;
+    case ACT_SUBSCRIBE: toggle_subscription(g_sub); break;
     case ACT_TRANSLATE: toggle_translation(); break;
     case ACT_ZOOM_IN: viewer_zoom(1.5f); break;
     case ACT_ZOOM_OUT: viewer_zoom(1 / 1.5f); break;
@@ -1348,12 +1611,29 @@ static void handle_job(Job *j)
             memset(&j->comments, 0, sizeof(j->comments));
             g_com_shown = com_batch_size();
             g_com_err[0] = '\0';
+            Post *cp = cur_post();
+            if (cp && g_comments.ratio > 0) { /* ratio de votes lu sur la page du post */
+                cp->ratio = g_comments.ratio;
+                build_body(true);
+                g_info_for = -2;
+            }
         } else {
             snprintf(g_com_err, sizeof(g_com_err), "%s", j->err);
         }
         if (g_tr_n) { clear_translation(); build_body(true); }
         build_comments(false);
         break;
+    case JOB_STATUS: {
+        srv_collect(j);
+        int ok = 0;
+        for (int i = 0; i < g_nsrv; i++) ok += g_srv[i].state == INST_OK;
+        if (j->rc != -2 && g_screen == SCR_SERVERS) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), TR("%d serveur(s) sur %d fonctionnent", "%d of %d servers working"), ok, g_nsrv);
+            ui_toast(msg);
+        }
+        break;
+    }
     case JOB_TRANSLATE:
         tr_collect(j);
         if (j->rc != 0 && j->rc != -2 && !strcmp(j->post_id, g_post_id)) ui_toast(j->err);
@@ -1393,6 +1673,7 @@ static void pump_jobs(void)
 {
     Job *cur = job_current();
     if (cur && cur->type == JOB_TRANSLATE) tr_collect(cur); /* affichage progressif */
+    if (cur && cur->type == JOB_STATUS) srv_collect(cur);
     Job *j = job_poll();
     if (j) {
         /* résultat remplacé par une demande plus récente du même type : on l'ignore */
@@ -1506,6 +1787,14 @@ static void draw_card(int i, float y)
     ui_icon_up(x, ty + 2, 9, COL_ACCENT);
     ui_text(x + 12, ty, 0.42f, COL_TEXT, score);
     x += 12 + ui_text_width(score, 0.42f) + 10;
+    int downs;
+    if (post_downvotes(p, &downs, NULL)) { /* votes négatifs (estimés), quand le ratio est connu */
+        char dn[16];
+        fmt_num(dn, sizeof(dn), downs);
+        ui_icon_down(x, ty + 2, 9, COL_LINK);
+        ui_text(x + 12, ty, 0.42f, COL_TEXT, dn);
+        x += 12 + ui_text_width(dn, 0.42f) + 10;
+    }
     ui_icon_comment(x, ty + 2, 10, COL_DIM);
     ui_text(x + 13, ty, 0.42f, COL_DIM, ncom);
     x += 13 + ui_text_width(ncom, 0.42f) + 10;
@@ -1528,11 +1817,100 @@ static void draw_card(int i, float y)
     }
 }
 
+/* Rangée de l'accueil : pastilles r/xxx (abonnements en orange, suggestions en gris) */
+#define CHIP_SC  0.45f
+#define CHIP_GAP 6.0f
+
+static float chip_x(int i) /* position (sans défilement) de la pastille i */
+{
+    float x = 0;
+    for (int k = 0; k < i; k++) {
+        char b[72];
+        snprintf(b, sizeof(b), "r/%.63s", g_chips[k]);
+        x += ui_pill_width(b, CHIP_SC) + CHIP_GAP;
+    }
+    return x;
+}
+
+static void chip_ensure_visible(void)
+{
+    char b[72];
+    snprintf(b, sizeof(b), "r/%.63s", g_chips[g_chip_sel]);
+    float x = chip_x(g_chip_sel), w = ui_pill_width(b, CHIP_SC);
+    float view = CARD_W - 16;
+    if (x < g_chip_to) g_chip_to = x;
+    if (x + w > g_chip_to + view) g_chip_to = x + w - view;
+    float total = chip_x(g_nchips);
+    if (g_chip_to > total - view) g_chip_to = total - view;
+    if (g_chip_to < 0) g_chip_to = 0;
+}
+
+static void chip_move(int d)
+{
+    if (g_nchips == 0) return;
+    g_chip_sel += d;
+    if (g_chip_sel < 0) g_chip_sel = 0;
+    if (g_chip_sel >= g_nchips) g_chip_sel = g_nchips - 1;
+    chip_ensure_visible();
+}
+
+static void draw_home_strip(float y)
+{
+    bool focus = g_sel < 0;
+    if (focus) ui_rrect(CARD_X - 2, y - 2, CARD_W + 4, STRIP_H + 4, 11, COL_ACCENT);
+    ui_rrect(CARD_X, y, CARD_W, STRIP_H, 9, focus ? COL_CARD_HI : COL_CARD);
+    float x = CARD_X + 8 - g_chip_scroll;
+    float py = y + (STRIP_H - ui_line_height(CHIP_SC) - 2) / 2;
+    for (int i = 0; i < g_nchips; i++) {
+        char b[72];
+        snprintf(b, sizeof(b), "r/%.63s", g_chips[i]);
+        float w = ui_pill_width(b, CHIP_SC);
+        if (x + w > CARD_X && x < CARD_X + CARD_W) {
+            bool sel = focus && i == g_chip_sel;
+            bool sub = i < g_nchip_subs;
+            if (sel) ui_rrect(x - 2, py - 2, w + 4, ui_line_height(CHIP_SC) + 6, 7, COL_WHITE);
+            ui_pill(x, py, b, CHIP_SC, sub ? COL_ACCENT : COL_LINE, COL_WHITE);
+        }
+        x += w + CHIP_GAP;
+    }
+    /* bords : la rangée défile horizontalement */
+    C2D_DrawRectSolid(CARD_X - 2, y, 0.5f, 4, STRIP_H, COL_BG);
+    C2D_DrawRectSolid(CARD_X + CARD_W - 2, y, 0.5f, 4, STRIP_H, COL_BG);
+}
+
+/* Écran du bas quand la rangée est sélectionnée : les pastilles en boutons tactiles */
+static void draw_home_chips_bottom(void)
+{
+    ui_text(12, 8, 0.5f, COL_WHITE, g_nchip_subs ? TR("Abonnements et suggestions", "Subscriptions and suggestions")
+                                                 : TR("Suggestions", "Suggestions"));
+    const int per = 15, cols = 3;
+    int page = g_chip_sel / per;
+    float bw = (BOT_W - 16 - (cols - 1) * 4) / cols, bh = 26;
+    for (int k = 0; k < per; k++) {
+        int i = page * per + k;
+        if (i >= g_nchips) break;
+        float x = 8 + (k % cols) * (bw + 4), y = 30 + (k / cols) * (bh + 4);
+        char b[72];
+        snprintf(b, sizeof(b), "r/%.63s", g_chips[i]);
+        if (ui_button(x, y, bw, bh, b, i == g_chip_sel || i < g_nchip_subs, true)) {
+            g_chip_sel = i;
+            g_act = ACT_OPEN;
+        }
+    }
+    ui_text_center(BOT_W / 2, TOOL_Y - 18, 0.38f, COL_DIM,
+                   TR(BTN_DPAD " gauche/droite choisir · " BTN_A " ouvrir · bas : posts",
+                      BTN_DPAD " left/right choose · " BTN_A " open · down: posts"));
+}
+
 static void draw_feed_top(void)
 {
     C2D_TargetClear(g_top, COL_BG);
     C2D_SceneBegin(g_top);
     float off = -g_scroll;
+    if (home_strip()) {
+        float sy = HEAD_H + 6 + off;
+        if (sy + STRIP_H > HEAD_H - 4) draw_home_strip(sy);
+    }
 
     for (int i = 0; i < g_ncards; i++) {
         float y = g_cards[i].y + off;
@@ -1606,6 +1984,8 @@ static void draw_feed_bottom(void)
         C2D_DrawRectSolid(8, TOOL_Y - 6, 0.5f, BOT_W - 16, 6, COL_BG); /* masque le débordement */
 
         if (ui_touch_tap() && ui_touch_y() < TOOL_Y) g_act = ACT_OPEN;
+    } else if (g_sel < 0 && home_strip()) {
+        draw_home_chips_bottom();
     } else {
         ui_logo(BOT_W / 2, 52, 26);
         ui_text_center(BOT_W / 2, 86, 0.65f, COL_WHITE, "Reddit3DS");
@@ -1623,12 +2003,25 @@ static void draw_feed_bottom(void)
     }
 
     draw_toolbar_bg();
-    const float by = TOOL_Y + 5, bh = 26, bw = 59;
-    if (ui_button(5, by, bw, bh, BTN_Y " Subs", false, true)) g_act = ACT_SEARCH;
-    if (ui_button(68, by, bw, bh, TR(BTN_R " Tri", BTN_R " Sort"), false, true)) g_act = ACT_SORT_NEXT;
-    if (ui_button(131, by, bw, bh, TR(BTN_X " Actu.", BTN_X " Reload"), false, true)) g_act = ACT_REFRESH;
-    if (ui_button(194, by, bw, bh, TR("Réglages", "Settings"), false, true)) g_act = ACT_SETTINGS;
-    if (ui_button(257, by, bw - 1, bh, TR(BTN_A " Ouvrir", BTN_A " Open"), true, g_sel < feed_items()))
+    /* sur un subreddit : bouton d'abonnement local en plus */
+    bool one_sub = g_sub[0] && !strchr(g_sub, '+');
+    const float by = TOOL_Y + 5, bh = 26, bw = one_sub ? 49 : 59, st = bw + 4;
+    float bx = 5;
+    if (ui_button(bx, by, bw, bh, BTN_Y " Subs", false, true)) g_act = ACT_SEARCH;
+    bx += st;
+    if (ui_button(bx, by, bw, bh, TR(BTN_R " Tri", BTN_R " Sort"), false, true)) g_act = ACT_SORT_NEXT;
+    bx += st;
+    if (ui_button(bx, by, bw, bh, TR(BTN_X " Actu.", BTN_X " Reload"), false, true)) g_act = ACT_REFRESH;
+    bx += st;
+    if (ui_button(bx, by, bw, bh, TR("Réglages", "Settings"), false, true)) g_act = ACT_SETTINGS;
+    bx += st;
+    if (one_sub) {
+        bool subbed = settings_is_sub(g_sub);
+        if (ui_button(bx, by, bw, bh, subbed ? TR("Abonné", "Joined") : TR("+ Abo.", "+ Join"), !subbed, true))
+            g_act = ACT_SUBSCRIBE;
+        bx += st;
+    }
+    if (ui_button(bx, by, BOT_W - 5 - bx, bh, TR(BTN_A " Ouvrir", BTN_A " Open"), true, g_sel < feed_items()))
         g_act = ACT_OPEN;
 }
 
@@ -1663,7 +2056,9 @@ static void draw_post_top(void)
     char title[96], score[16], right[32];
     snprintf(title, sizeof(title), "r/%s", p->sub);
     fmt_num(score, sizeof(score), p->score);
-    snprintf(right, sizeof(right), "%s pts", score);
+    int pct;
+    if (post_downvotes(p, NULL, &pct)) snprintf(right, sizeof(right), "%s pts · %d %%", score, pct);
+    else snprintf(right, sizeof(right), "%s pts", score);
     Job *cur = job_current();
     if (cur && cur->type == JOB_TRANSLATE && job_busy() && cur->ntexts > 0 && !strcmp(cur->post_id, p->id))
         snprintf(right, sizeof(right), TR("Traduction %d %%", "Translating %d %%"), cur->progress * 100 / cur->ntexts);
@@ -1743,10 +2138,9 @@ static const C2D_Image *viewer_image(ImgState *st)
     return im;
 }
 
-static void viewer_clamp(void)
+/* Limite le déplacement de l'image zoomée (visionneuse et vidéo) */
+static void clamp_pan(const C2D_Image *im)
 {
-    ImgState st;
-    const C2D_Image *im = viewer_image(&st);
     if (!im) { g_pan_x = g_pan_y = 0; return; }
     float iw, ih;
     img_size(im, &iw, &ih);
@@ -1759,6 +2153,12 @@ static void viewer_clamp(void)
     if (g_pan_x < -mx) g_pan_x = -mx;
     if (g_pan_y > my) g_pan_y = my;
     if (g_pan_y < -my) g_pan_y = -my;
+}
+
+static void viewer_clamp(void)
+{
+    ImgState st;
+    clamp_pan(viewer_image(&st));
 }
 
 static void draw_viewer_top(void)
@@ -1850,6 +2250,9 @@ static void draw_search_top(void)
             if (c->kind == SC_GOTO) snprintf(buf, sizeof(buf), TR("Aller à r/%s", "Go to r/%s"), name);
             else snprintf(buf, sizeof(buf), "r/%s", name);
             ui_text(CARD_X + 34, y + (c->h - ui_line_height(0.5f)) / 2, 0.5f, COL_TEXT, buf);
+            if (c->kind != SC_GOTO && settings_is_sub(name))
+                ui_pill(CARD_X + CARD_W - 12 - ui_pill_width(TR("abonné", "joined"), 0.38f), y + (c->h - ui_line_height(0.38f) - 2) / 2,
+                        TR("abonné", "joined"), 0.38f, COL_ACCENT, COL_WHITE);
             continue;
         }
         const SubInfo *s = &g_subs.items[c->idx];
@@ -1946,9 +2349,25 @@ static void draw_video_top(void)
     C2D_TargetClear(g_top, C2D_Color32(0, 0, 0, 0xFF));
     C2D_SceneBegin(g_top);
     const C2D_Image *im = video_image();
-    if (im) img_draw_fit(im, 0, 0, TOP_W, SCR_H, 1, 0, 0);
+    if (im) {
+        clamp_pan(im);
+        img_draw_fit(im, 0, 0, TOP_W, SCR_H, g_zoom, g_pan_x, g_pan_y);
+    }
+    if (g_zoom > 1.01f) {
+        char z[24];
+        snprintf(z, sizeof(z), "Zoom %d %%", (int)(g_zoom * 100 + 0.5f));
+        ui_pill(8, 8, z, 0.4f, COL_SCRIM, COL_WHITE);
+    }
 
     VideoStatus st = video_status();
+    if (video_seeking()) { /* repositionnement : position visée + roue */
+        char a[16], line[48];
+        fmt_time(a, sizeof(a), video_position());
+        snprintf(line, sizeof(line), "%s %s", video_seek_paused() ? "||" : ">>", a);
+        float pw = ui_pill_width(line, 0.5f);
+        ui_pill(TOP_W / 2 - pw / 2, SCR_H / 2 - 10, line, 0.5f, COL_SCRIM, COL_WHITE);
+        ui_spinner(TOP_W / 2, SCR_H / 2 + 30, 10, COL_ACCENT);
+    }
     if (st == VS_ERROR) {
         ui_rrect(40, 90, TOP_W - 80, 60, 10, COL_CARD);
         ui_text_center(TOP_W / 2, 100, 0.5f, COL_RED, TR("Lecture impossible", "Can't play video"));
@@ -1973,21 +2392,25 @@ static void draw_video_panel(void)
         Doc d;
         memset(&d, 0, sizeof(d));
         doc_text(&d, p->title, 0.48f, 0, BOT_W - 32, COL_WHITE, 0);
-        doc_truncate(&d, 3);
+        doc_truncate(&d, 2);
         ui_rrect(8, y, BOT_W - 16, d.h + 16, 9, COL_CARD);
         doc_draw(&d, 16, y + 8, BOT_W, SCR_H, 0, -1);
         y += d.h + 24;
         doc_free(&d);
     }
 
-    /* barre de progression */
+    /* barre de progression (touchée ou glissée : déplacement dans la vidéo) */
     float pos = video_position(), dur = video_duration();
+    if (g_scrubbing && dur > 0) pos = g_scrub_k * dur;
     char a[16], b[16], line[96];
     fmt_time(a, sizeof(a), pos);
     fmt_time(b, sizeof(b), dur);
     float bx = 16, bw = BOT_W - 32, by = y + 4;
+    g_vbar_x = bx;
+    g_vbar_y = by;
+    g_vbar_w = bw;
     ui_rrect(bx, by, bw, 6, 3, COL_CARD_HI);
-    if (video_status() == VS_LOADING) {
+    if (video_status() == VS_LOADING && !video_seeking()) {
         /* chargement : juste un pourcentage (barre = progression du téléchargement) */
         int pc = video_load_percent();
         if (pc > 0) ui_rrect(bx, by, bw * pc / 100.0f, 6, 3, COL_ACCENT);
@@ -1997,7 +2420,10 @@ static void draw_video_panel(void)
         if (dur > 0) {
             float k = pos / dur;
             if (k > 1) k = 1;
+            if (k < 0) k = 0;
             if (k > 0.01f) ui_rrect(bx, by, bw * k, 6, 3, COL_ACCENT);
+            if (video_can_seek()) /* poignée */
+                C2D_DrawCircleSolid(bx + bw * k, by + 3, 0.5f, g_scrubbing ? 7 : 5, COL_WHITE);
         }
         if (dur > 0) snprintf(line, sizeof(line), "%s / %s", a, b);
         else snprintf(line, sizeof(line), "%s", a);
@@ -2031,10 +2457,16 @@ static void draw_video_panel(void)
         float vx = bx + 90, vw = bw - 90;
         ui_rrect(vx, y + 5, vw, 5, 2.5f, COL_CARD_HI);
         ui_rrect(vx, y + 5, vw * video_volume(), 5, 2.5f, COL_LINK);
-        ui_text(bx, y + 18, 0.38f, COL_DIM, TR(BTN_DPAD " haut/bas ou " BTN_L BTN_R " : volume",
-                                               BTN_DPAD " up/down or " BTN_L BTN_R ": volume"));
     }
 
+    /* volume et zoom au doigt */
+    float ry = y + 18, rw = (bw - 12) / 4;
+    if (ry + 24 > TOOL_Y - 22) ry = TOOL_Y - 22 - 24;
+    g_vrow_y = ry;
+    if (ui_button(bx, ry, rw, 24, "Vol -", false, video_has_audio())) g_act = ACT_VOL_DOWN;
+    if (ui_button(bx + rw + 4, ry, rw, 24, "Vol +", false, video_has_audio())) g_act = ACT_VOL_UP;
+    if (ui_button(bx + 2 * (rw + 4), ry, rw, 24, "Zoom -", false, g_zoom > 1)) g_act = ACT_ZOOM_OUT;
+    if (ui_button(bx + 3 * (rw + 4), ry, rw, 24, "Zoom +", false, g_zoom < 8)) g_act = ACT_ZOOM_IN;
 }
 
 /* Onglets du bas : contrôles / commentaires (se dessinent après la liste pour cacher son débordement) */
@@ -2062,19 +2494,24 @@ static void draw_video_bottom(void)
     else draw_video_panel();
     draw_video_tabs();
     if (g_vid_tab == 0)
-        ui_text(16, TOOL_Y - 20, 0.38f, COL_DIM, TR(BTN_Y " : voir les commentaires", BTN_Y ": show comments"));
+        ui_text(16, TOOL_Y - 20, 0.36f, COL_DIM,
+                TR(BTN_Y " commentaires · " BTN_DPAD " ±5 s / volume · " BTN_L BTN_R " zoom",
+                   BTN_Y " comments · " BTN_DPAD " ±5 s / volume · " BTN_L BTN_R " zoom"));
 
     draw_toolbar_bg();
     const float tby = TOOL_Y + 5, bh = 26;
     VideoStatus st = video_status();
-    const char *play = st == VS_PLAYING ? TR(BTN_A " Pause", BTN_A " Pause")
+    bool seeking = video_seeking();
+    const char *play = seeking ? (video_seek_paused() ? TR(BTN_A " Lecture", BTN_A " Play") : TR(BTN_A " Pause", BTN_A " Pause"))
+                     : st == VS_PLAYING ? TR(BTN_A " Pause", BTN_A " Pause")
                      : st == VS_ENDED   ? TR(BTN_A " Revoir", BTN_A " Replay")
                      : st == VS_ERROR   ? TR(BTN_A " Réessayer", BTN_A " Retry")
                                         : TR(BTN_A " Lecture", BTN_A " Play");
-    if (ui_button(6, tby, 82, bh, TR(BTN_B " Retour", BTN_B " Back"), false, true)) g_act = ACT_BACK;
-    if (ui_button(92, tby, 112, bh, play, true, st != VS_LOADING)) g_act = ACT_VIDEO_PLAY;
-    if (ui_button(208, tby, 51, bh, "-", false, video_has_audio())) g_act = ACT_VOL_DOWN;
-    if (ui_button(263, tby, 51, bh, "+", false, video_has_audio())) g_act = ACT_VOL_UP;
+    bool can_seek = video_can_seek();
+    if (ui_button(6, tby, 72, bh, TR(BTN_B " Retour", BTN_B " Back"), false, true)) g_act = ACT_BACK;
+    if (ui_button(82, tby, 62, bh, "<< 5 s", false, can_seek)) g_act = ACT_SEEK_BACK;
+    if (ui_button(148, tby, 100, bh, play, true, st != VS_LOADING || seeking)) g_act = ACT_VIDEO_PLAY;
+    if (ui_button(252, tby, 62, bh, "5 s >>", false, can_seek)) g_act = ACT_SEEK_FWD;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2100,7 +2537,7 @@ static void draw_settings_top(void)
         float vw = ui_text_width(val, 0.46f);
         float vx = CARD_X + CARD_W - 14 - vw;
         float vy = y + (SET_ROW_H - ui_line_height(0.46f)) / 2;
-        if (i == SET_CLEAR) {
+        if (i == SET_CLEAR || i == SET_STATUS) {
             ui_text(vx, vy, 0.46f, sel ? COL_ACCENT2 : COL_DIM, val);
             continue;
         }
@@ -2117,7 +2554,7 @@ static void draw_settings_top(void)
 
     float total = HEAD_H + 6 + SET_COUNT * (SET_ROW_H + 4) + 40;
     float fy = HEAD_H + 6 + SET_COUNT * (SET_ROW_H + 4) + 6 + off;
-    ui_text_center(TOP_W / 2, fy, 0.38f, COL_DIM, "Reddit3DS v" APP_VERSION "  ·  sdmc:/3ds/reddit3ds/config.ini");
+    ui_text_center(TOP_W / 2, fy, 0.38f, COL_DIM, "Reddit3DS v" APP_VERSION " · build " BUILD_STAMP "  ·  sdmc:/3ds/reddit3ds/config.ini");
     draw_scrollbar(TOP_W - 4, HEAD_H + 2, SCR_H - HEAD_H - 4, total, g_set_scroll);
     draw_header(TOP_W, TR("Paramètres", "Settings"), NULL, false);
     ui_draw_toast(TOP_W);
@@ -2136,7 +2573,7 @@ static void draw_settings_bottom(void)
     char val[96];
     set_value(g_set_sel, val, sizeof(val));
     ui_text(14, 12, 0.55f, COL_WHITE, set_label(g_set_sel));
-    if (g_set_sel != SET_CLEAR) ui_text(14, 34, 0.48f, COL_ACCENT2, val);
+    if (g_set_sel != SET_CLEAR && g_set_sel != SET_STATUS) ui_text(14, 34, 0.48f, COL_ACCENT2, val);
     ui_rrect(8, 58, BOT_W - 16, TOOL_Y - 64, 9, COL_CARD);
     doc_draw(&g_set_help, 16, 66, BOT_W - 32, TOOL_Y - 76, 0, -1);
     C2D_DrawRectSolid(8, TOOL_Y - 6, 0.5f, BOT_W - 16, 6, COL_BG);
@@ -2144,8 +2581,9 @@ static void draw_settings_bottom(void)
     draw_toolbar_bg();
     const float by = TOOL_Y + 5, bh = 26;
     if (ui_button(6, by, 92, bh, TR(BTN_B " Retour", BTN_B " Back"), false, true)) g_act = ACT_BACK;
-    if (g_set_sel == SET_CLEAR || g_set_sel == SET_START) {
-        if (ui_button(102, by, 212, bh, g_set_sel == SET_CLEAR ? TR(BTN_A " Vider", BTN_A " Clear")
+    if (g_set_sel == SET_CLEAR || g_set_sel == SET_START || g_set_sel == SET_STATUS) {
+        if (ui_button(102, by, 212, bh, g_set_sel == SET_CLEAR  ? TR(BTN_A " Vider", BTN_A " Clear")
+                                      : g_set_sel == SET_STATUS ? TR(BTN_A " Tester les serveurs", BTN_A " Test servers")
                                                                 : TR(BTN_A " Prendre le sub actuel", BTN_A " Use current sub"),
                       true, true))
             g_act = ACT_SET_ACTIVATE;
@@ -2156,14 +2594,147 @@ static void draw_settings_bottom(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Rendu : statut des serveurs Redlib                                 */
+
+static u32 srv_color(int state)
+{
+    switch (state) {
+    case INST_OK:      return COL_GREEN;
+    case INST_BLOCKED: return COL_YELLOW;
+    case INST_DOWN:    return COL_RED;
+    default:           return COL_DIM;
+    }
+}
+
+static const char *srv_state_label(int state)
+{
+    switch (state) {
+    case INST_OK:      return TR("Fonctionne", "Working");
+    case INST_BLOCKED: return TR("Bloqué", "Blocked");
+    case INST_DOWN:    return TR("Hors ligne", "Offline");
+    default:           return TR("Non testé", "Not tested");
+    }
+}
+
+/* Index du serveur en cours de test, -1 si aucun */
+static int srv_testing_index(void)
+{
+    Job *cur = job_current();
+    if (!cur || cur->type != JOB_STATUS || !job_busy()) return loading(JOB_STATUS, -1) ? 0 : -1;
+    return cur->progress;
+}
+
+static void draw_servers_top(void)
+{
+    C2D_TargetClear(g_top, COL_BG);
+    C2D_SceneBegin(g_top);
+    float off = -g_srv_scroll;
+    int pref = srv_pref_index(), testing = srv_testing_index();
+    char buf[96];
+
+    for (int i = 0; i < g_nsrv; i++) {
+        const InstStatus *s = &g_srv[i];
+        float y = HEAD_H + 6 + i * (SRV_ROW_H + 4) + off;
+        if (y > SCR_H || y + SRV_ROW_H < HEAD_H) continue;
+        bool sel = (i == g_srv_sel);
+        if (sel) ui_rrect(CARD_X - 2, y - 2, CARD_W + 4, SRV_ROW_H + 4, 11, COL_ACCENT);
+        ui_rrect(CARD_X, y, CARD_W, SRV_ROW_H, 9, sel ? COL_CARD_HI : COL_CARD);
+        float cy = y + SRV_ROW_H / 2;
+        if (i == testing && s->state == INST_UNTESTED) ui_spinner(CARD_X + 16, cy, 6, COL_ACCENT);
+        else C2D_DrawCircleSolid(CARD_X + 16, cy, 0.5f, 6, srv_color(s->state));
+
+        float tx = CARD_X + 30;
+        ui_text(tx, cy - ui_line_height(0.48f) / 2, 0.48f, COL_TEXT, s->host);
+        if (i == pref) {
+            float hw = ui_text_width(s->host, 0.48f);
+            ui_pill(tx + hw + 6, cy - ui_line_height(0.36f) / 2 - 1, TR("choisi", "chosen"), 0.36f, COL_ACCENT, COL_WHITE);
+        }
+        if (s->state == INST_OK) snprintf(buf, sizeof(buf), "%d ms", s->ms);
+        else if (i == testing && s->state == INST_UNTESTED) snprintf(buf, sizeof(buf), "%s", TR("test...", "testing..."));
+        else snprintf(buf, sizeof(buf), "%s", srv_state_label(s->state));
+        float vw = ui_text_width(buf, 0.44f);
+        ui_text(CARD_X + CARD_W - 12 - vw, cy - ui_line_height(0.44f) / 2, 0.44f, srv_color(s->state), buf);
+    }
+    if (g_nsrv == 0)
+        ui_text_center(TOP_W / 2, 110, 0.48f, COL_DIM, TR("Aucun serveur dans config.ini", "No server in config.ini"));
+
+    float total = HEAD_H + 6 + g_nsrv * (SRV_ROW_H + 4) + 6;
+    draw_scrollbar(TOP_W - 4, HEAD_H + 2, SCR_H - HEAD_H - 4, total, g_srv_scroll);
+
+    int ok = 0, done = 0;
+    for (int i = 0; i < g_nsrv; i++) {
+        ok += g_srv[i].state == INST_OK;
+        done += g_srv[i].state != INST_UNTESTED;
+    }
+    char right[32] = "";
+    if (done) snprintf(right, sizeof(right), "%d/%d OK", ok, g_nsrv);
+    draw_header(TOP_W, TR("Serveurs Redlib", "Redlib servers"), right, testing >= 0);
+    ui_draw_toast(TOP_W);
+}
+
+static void draw_servers_bottom(void)
+{
+    C2D_TargetClear(g_bot, COL_BG);
+    C2D_SceneBegin(g_bot);
+    char line[160];
+    ui_rrect(8, 8, BOT_W - 16, TOOL_Y - 14, 9, COL_CARD);
+    if (g_srv_sel >= 0 && g_srv_sel < g_nsrv) {
+        const InstStatus *s = &g_srv[g_srv_sel];
+        ui_text(16, 14, 0.52f, COL_WHITE, s->host);
+        snprintf(line, sizeof(line), "%s", srv_state_label(s->state));
+        if (s->state != INST_UNTESTED) {
+            size_t l = strlen(line);
+            snprintf(line + l, sizeof(line) - l, " · %d ms", s->ms);
+        }
+        if (s->state == INST_OK) {
+            size_t l = strlen(line);
+            snprintf(line + l, sizeof(line) - l, TR(" · %d posts", " · %d posts"), s->posts);
+        }
+        C2D_DrawCircleSolid(20, 44, 0.5f, 4, srv_color(s->state));
+        ui_text(30, 36, 0.45f, srv_color(s->state), line);
+
+        Doc d;
+        memset(&d, 0, sizeof(d));
+        if (s->err[0]) {
+            doc_text(&d, s->err, 0.42f, 0, BOT_W - 40, COL_TEXT, 0);
+            doc_truncate(&d, 2);
+            doc_space(&d, 6);
+        }
+        doc_text(&d, TR("Vert : fonctionne. Jaune : bloqué (anti-robot, trop de requêtes, instance fermée). "
+                        "Rouge : ne répond pas. " BTN_A " pour utiliser ce serveur, " BTN_Y " pour revenir au choix "
+                        "automatique (le plus rapide d'abord).",
+                        "Green: working. Yellow: blocked (anti-bot, too many requests, instance closed). "
+                        "Red: not responding. " BTN_A " to use this server, " BTN_Y " to go back to automatic "
+                        "choice (fastest first)."),
+                 0.38f, 0, BOT_W - 40, COL_DIM, 0);
+        doc_draw(&d, 18, 60, BOT_W - 36, TOOL_Y - 70, 0, -1);
+        doc_free(&d);
+    }
+    C2D_DrawRectSolid(8, TOOL_Y - 6, 0.5f, BOT_W - 16, 6, COL_BG);
+
+    draw_toolbar_bg();
+    const float by = TOOL_Y + 5, bh = 26;
+    bool testing = loading(JOB_STATUS, -1);
+    if (ui_button(6, by, 72, bh, TR(BTN_B " Retour", BTN_B " Back"), false, true)) g_act = ACT_BACK;
+    if (ui_button(82, by, 76, bh, TR(BTN_X " Retester", BTN_X " Retest"), false, !testing)) g_act = ACT_SRV_TEST;
+    if (ui_button(162, by, 76, bh, TR(BTN_A " Utiliser", BTN_A " Use"), true, g_nsrv > 0)) g_act = ACT_SRV_USE;
+    if (ui_button(242, by, 72, bh, BTN_Y " Auto", false, g_cfg.redlib_server[0] != '\0')) g_act = ACT_SRV_AUTO;
+}
+
+/* ------------------------------------------------------------------ */
 /* Entrées                                                            */
 
 static void input_feed(u32 down, u32 rep)
 {
     if (rep & KEY_DOWN) feed_move(+1);
     if (rep & KEY_UP) feed_move(-1);
-    if (rep & KEY_RIGHT) feed_move(+4);
-    if (rep & KEY_LEFT) feed_move(-4);
+    if (g_sel < 0) { /* rangée des suggestions */
+        if (rep & KEY_RIGHT) chip_move(+1);
+        if (rep & KEY_LEFT) chip_move(-1);
+    } else {
+        if (rep & KEY_RIGHT) feed_move(+4);
+        if (rep & KEY_LEFT) feed_move(-4);
+    }
     if (down & KEY_A) g_act = ACT_OPEN;
     if (down & KEY_B) g_act = ACT_BACK;
     if (down & KEY_X) g_act = ACT_REFRESH;
@@ -2278,22 +2849,47 @@ static void input_search(u32 down, u32 rep)
     if (down & KEY_SELECT) g_act = ACT_SETTINGS;
 }
 
-static void input_video(u32 down, u32 rep)
+static void input_video(u32 down, u32 rep, u32 held, const circlePosition *cp)
 {
     if (down & KEY_A) g_act = ACT_VIDEO_PLAY;
     if (down & KEY_B) g_act = ACT_BACK;
     if (down & KEY_Y) g_vid_tab = !g_vid_tab; /* contrôles <-> commentaires */
-    if (rep & (KEY_R | KEY_ZR)) g_act = ACT_VOL_UP;
-    if (rep & (KEY_L | KEY_ZL)) g_act = ACT_VOL_DOWN;
+
+    /* zoom et déplacement, comme dans la visionneuse d'images */
+    if (held & (KEY_R | KEY_ZR)) viewer_zoom(1.03f);
+    if (held & (KEY_L | KEY_ZL)) viewer_zoom(1 / 1.03f);
+    if (abs(cp->dx) > 20) g_pan_x -= cp->dx / 12.0f;
+    if (abs(cp->dy) > 20) g_pan_y += cp->dy / 12.0f;
+    clamp_pan(video_image());
+
     if (g_vid_tab == 0) {
         if (rep & KEY_UP) g_act = ACT_VOL_UP;
         if (rep & KEY_DOWN) g_act = ACT_VOL_DOWN;
+        if (rep & KEY_LEFT) g_act = ACT_SEEK_BACK;
+        if (rep & KEY_RIGHT) g_act = ACT_SEEK_FWD;
     } else {
         input_comments(rep, VTAB_H, com_view_h());
     }
-    if (ui_touch_tap() && ui_touch_y() < TOOL_Y) {
+
+    /* barre de progression : toucher ou glisser puis relâcher pour se déplacer */
+    bool scrub_end = false;
+    if (g_vid_tab == 0 && ui_touch_down() && video_can_seek() && video_duration() > 0 &&
+        ui_touch_y() >= g_vbar_y - 10 && ui_touch_y() <= g_vbar_y + 16 &&
+        ui_touch_x() >= g_vbar_x - 8 && ui_touch_x() <= g_vbar_x + g_vbar_w + 8)
+        g_scrubbing = true;
+    if (g_scrubbing) {
+        float k = (ui_touch_x() - g_vbar_x) / g_vbar_w;
+        g_scrub_k = k < 0 ? 0 : k > 1 ? 1 : k;
+        if (!ui_touch_held()) {
+            g_scrubbing = false;
+            scrub_end = true;
+            if (g_vid_tab == 0) video_seek(g_scrub_k * video_duration());
+        }
+    }
+    if (!scrub_end && ui_touch_tap() && ui_touch_y() < TOOL_Y) {
         if (ui_touch_y() < VTAB_H) g_vid_tab = ui_touch_x() < BOT_W / 2.0f ? 0 : 1;
-        else if (g_vid_tab == 0) g_act = ACT_VIDEO_PLAY;
+        else if (g_vid_tab == 0 && (ui_touch_y() < g_vrow_y - 2 || ui_touch_y() > g_vrow_y + 26))
+            g_act = ACT_VIDEO_PLAY;
     }
 }
 
@@ -2304,6 +2900,19 @@ static void input_settings(u32 down, u32 rep)
     if (rep & KEY_LEFT) g_act = ACT_SET_PREV;
     if (rep & KEY_RIGHT) g_act = ACT_SET_NEXT;
     if (down & KEY_A) g_act = ACT_SET_ACTIVATE;
+    if (down & (KEY_B | KEY_SELECT)) g_act = ACT_BACK;
+}
+
+static void input_servers(u32 down, u32 rep)
+{
+    if (g_nsrv > 0 && (rep & (KEY_DOWN | KEY_UP))) {
+        g_srv_sel = (g_srv_sel + ((rep & KEY_DOWN) ? 1 : g_nsrv - 1)) % g_nsrv;
+        srv_ensure_visible();
+    }
+    /* toucher une ligne de l'écran du haut n'est pas possible : le choix se fait à la croix */
+    if (down & KEY_A) g_act = ACT_SRV_USE;
+    if (down & KEY_Y) g_act = ACT_SRV_AUTO;
+    if ((down & KEY_X) && !loading(JOB_STATUS, -1)) g_act = ACT_SRV_TEST;
     if (down & (KEY_B | KEY_SELECT)) g_act = ACT_BACK;
 }
 
@@ -2366,7 +2975,8 @@ int main(void)
         case SCR_IMAGE:    input_viewer(down, held, &cp); break;
         case SCR_SEARCH:   input_search(down, rep); break;
         case SCR_SETTINGS: input_settings(down, rep); break;
-        case SCR_VIDEO:    input_video(down, rep); break;
+        case SCR_VIDEO:    input_video(down, rep, held, &cp); break;
+        case SCR_SERVERS:  input_servers(down, rep); break;
         }
         if (g_sel_stable < 1000) g_sel_stable++;
 
@@ -2375,6 +2985,8 @@ int main(void)
         smooth(&g_com_scroll, g_com_to);
         smooth(&g_s_scroll, g_s_to);
         smooth(&g_set_scroll, g_set_to);
+        smooth(&g_srv_scroll, g_srv_to);
+        smooth(&g_chip_scroll, g_chip_to);
 
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         ui_frame_begin();
@@ -2389,6 +3001,7 @@ int main(void)
         case SCR_SEARCH:   draw_search_top();   draw_search_bottom();   break;
         case SCR_SETTINGS: draw_settings_top(); draw_settings_bottom(); break;
         case SCR_VIDEO:    draw_video_top();    draw_video_bottom();    break;
+        case SCR_SERVERS:  draw_servers_top();  draw_servers_bottom();  break;
         }
         C3D_FrameEnd(0);
 

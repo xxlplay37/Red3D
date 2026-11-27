@@ -41,6 +41,10 @@ static void run(Job *j)
         j->rc = translate_texts(s_conn, j->texts, j->ntexts, j->tl, j->out, &j->progress,
                                 j->err, sizeof(j->err));
         break;
+    case JOB_STATUS:
+        j->nstat = reddit_check_instances(j->stat, REDDIT_MAX_INSTANCES, &j->progress);
+        j->rc = 0;
+        break;
     default:
         break;
     }

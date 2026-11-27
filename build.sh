@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile Reddit3DS en .cia sans rien installer sur le système (ni sudo, ni Docker).
+# Compile Red3DS.cia sans rien installer sur le système (ni sudo, ni Docker).
 # La toolchain devkitARM est extraite de l'image Docker officielle devkitpro/devkitarm,
 # makerom est téléchargé depuis sa release GitHub.
 # Tout est rangé dans ~/.cache/reddit3ds (réutilisé aux lancements suivants).
@@ -97,10 +97,14 @@ fi
 # --------------------------------------------------------------------------
 # Compilation dans un dossier Linux : gcc gère mal les chemins /mnt/c de WSL
 log "Compilation..."
+# Anciens fichiers retirés d'abord : impossible d'installer par erreur une version périmée
+rm -f "$ROOT/Red3DS.cia" "$ROOT/Red3DS.3dsx" "$ROOT/Reddit3DS.cia" "$ROOT/Reddit3DS.3dsx"
+STAMP=$(date "+%d/%m %H:%M")
 SRC="$TC/src"
 rm -rf "$SRC" && mkdir -p "$SRC"
 cp -r Makefile app.rsf source assets romfs "$SRC/"
-make -C "$SRC" cia FFMPEG="$TC/ffmpeg"
-cp "$SRC/Reddit3DS.cia" "$SRC/Reddit3DS.3dsx" "$ROOT/"
+make -C "$SRC" cia FFMPEG="$TC/ffmpeg" BUILD_STAMP="$STAMP"
+cp "$SRC/Red3DS.cia" "$SRC/Red3DS.3dsx" "$ROOT/"
 
-log "Terminé : $ROOT/Reddit3DS.cia (et Reddit3DS.3dsx)"
+log "Terminé : $ROOT/Red3DS.cia (et Red3DS.3dsx), build du $STAMP"
+echo "Dans l'appli : SELECT (Paramètres), tout en bas, la ligne doit afficher « build $STAMP »."

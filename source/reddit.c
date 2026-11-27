@@ -17,14 +17,16 @@
 
 #include <3ds.h>
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define MAX_COMMENTS 400
-#define MAX_INSTANCES 12
+#define MAX_INSTANCES REDDIT_MAX_INSTANCES
 #define ARCTIC_BASE  "https://arctic-shift.photon-reddit.com/api"
 
 typedef enum { MODE_AUTO, MODE_REDLIB, MODE_ARCHIVE } Mode;
@@ -36,6 +38,7 @@ static u64  s_token_expiry;
 static char s_instances[MAX_INSTANCES][64];
 static int  s_ninstances;
 static int  s_good_instance; /* dernière instance qui a répondu */
+static int  s_pref = -1;     /* instance imposée dans les paramètres, -1 = automatique */
 static Mode s_mode = MODE_AUTO;
 static char s_source[96] = "";
 
@@ -71,12 +74,69 @@ const char *reddit_source(void)
     return s_source;
 }
 
-void reddit_configure(const char *client_id, const char *instances, int mode)
+/* "https://hote/chemin" -> "hote" */
+static void host_only(const char *in, char *out, size_t n)
+{
+    if (!strncmp(in, "https://", 8)) in += 8;
+    else if (!strncmp(in, "http://", 7)) in += 7;
+    size_t i = 0;
+    while (in[i] && in[i] != '/' && !isspace((unsigned char)in[i]) && i + 1 < n) { out[i] = in[i]; i++; }
+    out[i] = '\0';
+}
+
+void reddit_configure(const char *client_id, const char *instances, int mode, const char *server)
 {
     if (strcmp(s_client_id, client_id ? client_id : "")) s_token[0] = '\0';
     snprintf(s_client_id, sizeof(s_client_id), "%s", client_id ? client_id : "");
     set_instances(instances && *instances ? instances : REDDIT_DEFAULT_INSTANCES);
     s_mode = mode == 1 ? MODE_REDLIB : mode == 2 ? MODE_ARCHIVE : MODE_AUTO;
+
+    s_pref = -1;
+    char h[64];
+    host_only(server ? server : "", h, sizeof(h));
+    if (h[0]) {
+        for (int i = 0; i < s_ninstances; i++)
+            if (!strcasecmp(s_instances[i], h)) { s_pref = i; break; }
+        if (s_pref < 0) { /* serveur absent de la liste : on l'ajoute (ou il remplace le dernier) */
+            int i = s_ninstances < MAX_INSTANCES ? s_ninstances++ : MAX_INSTANCES - 1;
+            snprintf(s_instances[i], sizeof(s_instances[0]), "%s", h);
+            s_pref = i;
+        }
+    }
+}
+
+int reddit_instance_count(void)
+{
+    return s_ninstances;
+}
+
+const char *reddit_instance(int i)
+{
+    return (i >= 0 && i < s_ninstances) ? s_instances[i] : "";
+}
+
+/* Instances à essayer : la seule imposée, sinon toutes en commençant par la dernière qui a marché */
+static int tries_count(void)
+{
+    return s_pref >= 0 ? 1 : s_ninstances;
+}
+
+static int try_index(int k)
+{
+    return s_pref >= 0 ? s_pref : (s_good_instance + k) % s_ninstances;
+}
+
+bool reddit_estimate_votes(int score, float ratio, int *ups, int *downs)
+{
+    if (ratio <= 0.0f || ratio > 1.0f || fabsf(ratio - 0.5f) < 0.005f) return false;
+    double u = score * (double)ratio / (2.0 * ratio - 1.0);
+    if (u < 0) return false;
+    int up = (int)(u + 0.5);
+    int down = up - score;
+    if (down < 0) down = 0;
+    if (ups) *ups = up;
+    if (downs) *downs = down;
+    return true;
 }
 
 bool reddit_using_oauth(void)
@@ -265,6 +325,7 @@ static void fill_post_json(Post *p, const JVal *d)
     p->flair     = xstrdup(json_str(d, "link_flair_text", ""));
     p->score     = (int)json_num(d, "score", 0);
     p->ncomments = (int)json_num(d, "num_comments", 0);
+    p->ratio     = (float)json_num(d, "upvote_ratio", 0);
     p->created   = json_num(d, "created_utc", 0);
     p->is_self   = json_bool(d, "is_self", false);
     p->nsfw      = json_bool(d, "over_18", false);
@@ -457,6 +518,8 @@ static int oauth_comments(const Post *post, Comments *out, char *err, size_t err
     snprintf(path, sizeof(path), "/comments/%s", post->id);
     JVal *j = oauth_get(path, "raw_json=1&limit=150&depth=8", err, errlen);
     if (!j) return -1;
+    JVal *pd = json_get(json_idx(json_get(json_get(json_idx(j, 0), "data"), "children"), 0), "data");
+    out->ratio = (float)json_num(pd, "upvote_ratio", 0);
     walk_comments(json_get(json_get(json_idx(j, 1), "data"), "children"), 0, post->author, out);
     json_free(j);
     return 0;
@@ -577,8 +640,10 @@ static bool redlib_parse_post(const char *b, const char *e, const char *host, Po
                 if (vb) {
                     memcpy(vb, vid, vn);
                     vb[vn] = '\0';
-                    copy_id_after(vb, "/vid/", p->video_id, sizeof(p->video_id));
-                    if (!p->video_id[0]) copy_id_after(vb, "/hls/", p->video_id, sizeof(p->video_id));
+                    /* selon l'instance : /vid/ID/..., /hls/ID/..., /packaged/ID/... ou https://v.redd.it/ID/... */
+                    static const char *VMARK[] = { "/vid/", "/hls/", "/packaged/", "v.redd.it/" };
+                    for (int m = 0; m < 4 && !p->video_id[0]; m++)
+                        copy_id_after(vb, VMARK[m], p->video_id, sizeof(p->video_id));
                     free(vb);
                 }
             }
@@ -677,6 +742,22 @@ static int redlib_feed_from(const char *host, const char *sub, const char *sort,
     return 0;
 }
 
+/* Page d'un post : « <p>98%<span id="upvoted"> Upvoted</span></p> » -> 0.98 (0 si absent) */
+static float redlib_ratio(const char *html, const char *end)
+{
+    const char *u = html_find(html, end, "id=\"upvoted\"");
+    if (!u) return 0;
+    const char *pc = NULL;
+    for (const char *q = u; q > html && q > u - 48; q--)
+        if (*q == '%') { pc = q; break; }
+    if (!pc) return 0;
+    const char *d = pc;
+    while (d > html && (isdigit((unsigned char)d[-1]) || d[-1] == '.')) d--;
+    if (d == pc) return 0;
+    float v = (float)atof(d) / 100.0f;
+    return (v > 0 && v <= 1) ? v : 0;
+}
+
 static int redlib_comments_from(const char *host, const Post *post, Comments *out,
                                 char *err, size_t errlen)
 {
@@ -692,6 +773,7 @@ static int redlib_comments_from(const char *host, const Post *post, Comments *ou
         buf_free(&b);
         return -1;
     }
+    out->ratio = redlib_ratio(html, end);
 
     static const char *T_COMMENT = "class=\"comment\" data-comment-id=";
     static const char *T_REPLIES = "<blockquote class=\"replies\">";
@@ -774,14 +856,121 @@ static int redlib_comments_from(const char *host, const Post *post, Comments *ou
 /* ------------------------------------------------------------------ */
 /* Source 3 : archive Arctic Shift (JSON)                             */
 
+/* r/popular n'existe pas dans l'archive : on le remplace par de grands subreddits */
+#define ARCHIVE_POPULAR "AskReddit+worldnews+todayilearned+gaming+movies+science+pics+technology"
+#define ARCHIVE_MULTI_MAX 10   /* subreddits interrogés au plus par page */
+#define ARCHIVE_PER_SUB   10   /* posts demandés par subreddit */
+#define ARCHIVE_WINDOW    (3 * 86400) /* fenêtre de dates : sans elle, les gros subreddits dépassent le délai */
+
+static int post_newer_first(const void *a, const void *b)
+{
+    double x = ((const Post *)a)->created, y = ((const Post *)b)->created;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+/*
+ * Fil de plusieurs subreddits depuis l'archive (fil d'accueil, multi « a+b+c ») : l'API n'accepte qu'un
+ * subreddit par requête, donc une requête par subreddit, puis fusion par date. Les posts plus anciens
+ * que la coupure (voir plus bas) reviennent à la page suivante. Testé sur l'API réelle : pages triées,
+ * sans doublon, ~10 posts par subreddit.
+ */
+static int archive_multi(const char *list, const char *after, Feed *feed, char *err, size_t errlen)
+{
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s", list);
+    char *subs[ARCHIVE_MULTI_MAX];
+    int ns = 0;
+    char *sv = NULL;
+    for (char *t = strtok_r(tmp, "+", &sv); t && ns < ARCHIVE_MULTI_MAX; t = strtok_r(NULL, "+", &sv))
+        if (*t) subs[ns++] = t;
+    if (ns == 0) {
+        snprintf(err, errlen, "%s", TR("Archive : aucun subreddit", "Archive: no subreddit"));
+        return -1;
+    }
+
+    double before = 0;
+    if (!strncmp(after, "as:", 3)) before = atof(after + 3);
+    if (before <= 0) before = (double)time(NULL) + 60;
+
+    const int per_sub = ns == 1 ? 25 : ARCHIVE_PER_SUB;
+    Feed all = {0};
+    double cutoff = 0;
+    int ok = 0;
+    char last_err[160] = "";
+    for (int i = 0; i < ns; i++) {
+        char url[384];
+        snprintf(url, sizeof(url), ARCTIC_BASE "/posts/search?subreddit=%s&limit=%d&sort=desc&before=%.0f&after=%.0f",
+                 subs[i], per_sub, before, before - ARCHIVE_WINDOW);
+        Buf b;
+        long code = 0;
+        if (i > 0) svcSleepThread(300 * 1000000LL); /* l'archive répond « slow down » aux rafales */
+        int r = fetch(url, NULL, ACCEPT_JSON, &b, &code, last_err, sizeof(last_err));
+        if (r && code == 422) { /* « Timeout » ponctuel côté archive : une seconde tentative passe presque toujours */
+            svcSleepThread(1000 * 1000000LL);
+            r = fetch(url, NULL, ACCEPT_JSON, &b, &code, last_err, sizeof(last_err));
+        }
+        if (r) {
+            if (!strcmp(last_err, "Annulé")) break;
+            continue; /* un subreddit en échec ne bloque pas les autres */
+        }
+        JVal *j = json_parse(b.data);
+        buf_free(&b);
+        JVal *data = json_get(j, "data");
+        if (data && data->type == J_ARR) {
+            ok++;
+            int got = 0;
+            double oldest = 0;
+            for (JVal *c = data->child; c; c = c->next) {
+                Post *p = feed_push(&all);
+                if (!p) break;
+                fill_post_json(p, c);
+                got++;
+                if (oldest == 0 || p->created < oldest) oldest = p->created;
+            }
+            /* lot complet : la suite viendra à la page suivante. On coupe au plus ancien des lots complets les
+             * PLUS RÉCENTS : chaque subreddit garde ses posts (fil équilibré), quitte à sauter quelques posts des
+             * subreddits très actifs entre deux pages. */
+            if (got >= per_sub && (cutoff == 0 || oldest < cutoff)) cutoff = oldest;
+        } else {
+            snprintf(last_err, sizeof(last_err), "%s", json_str(j, "error", TR("réponse inattendue", "unexpected response")));
+        }
+        json_free(j);
+    }
+    if (ok == 0) {
+        feed_clear(&all);
+        snprintf(err, errlen, TR("Archive : %s", "Archive: %s"), last_err[0] ? last_err : TR("aucune réponse", "no response"));
+        return -1;
+    }
+
+    if (all.n > 1) qsort(all.items, (size_t)all.n, sizeof(Post), post_newer_first);
+    double oldest_kept = 0;
+    int kept = 0;
+    for (int i = 0; i < all.n; i++) {
+        Post *p = &all.items[i];
+        if (cutoff > 0 && p->created <= cutoff) { post_free(p); continue; }
+        Post *d = feed_push(feed);
+        if (!d) { post_free(p); continue; }
+        *d = *p; /* on déplace le post (ses chaînes changent de propriétaire) */
+        oldest_kept = p->created;
+        kept++;
+    }
+    free(all.items);
+
+    if (cutoff > 0) snprintf(feed->after, sizeof(feed->after), "as:%.0f", cutoff + 1);
+    else if (kept > 0) snprintf(feed->after, sizeof(feed->after), "as:%.0f", oldest_kept); /* fenêtre épuisée */
+    else if (before - ARCHIVE_WINDOW > (double)time(NULL) - 60.0 * 86400) /* rien dans la fenêtre : plus loin */
+        snprintf(feed->after, sizeof(feed->after), "as:%.0f", before - ARCHIVE_WINDOW);
+    else feed->after[0] = '\0';
+    snprintf(s_source, sizeof(s_source), TR("Archive Arctic Shift (récents)", "Archive Arctic Shift (newest)"));
+    return 0;
+}
+
 static int archive_feed(const char *sub, const char *after, double last_created, Feed *feed,
                         char *err, size_t errlen)
 {
-    if (!*sub || !strcasecmp(sub, "popular") || !strcasecmp(sub, "all") || strchr(sub, '+')) {
-        snprintf(err, errlen, "%s", TR("L'archive ne gère ni r/popular ni le fil d'accueil : choisis un subreddit (Y).",
-                                       "The archive can't serve r/popular or the home feed: pick a subreddit (Y)."));
-        return -1;
-    }
+    if (!*sub || !strcasecmp(sub, "popular") || !strcasecmp(sub, "all"))
+        return archive_multi(ARCHIVE_POPULAR, after, feed, err, errlen);
+    if (strchr(sub, '+')) return archive_multi(sub, after, feed, err, errlen);
     char url[384], before[48] = "";
     if (!strncmp(after, "as:", 3)) snprintf(before, sizeof(before), "&before=%s", after + 3);
     else if (after[0] && last_created > 0) snprintf(before, sizeof(before), "&before=%.0f", last_created);
@@ -789,7 +978,11 @@ static int archive_feed(const char *sub, const char *after, double last_created,
 
     Buf b;
     long code = 0;
-    if (fetch(url, NULL, ACCEPT_JSON, &b, &code, err, errlen)) return -1;
+    if (fetch(url, NULL, ACCEPT_JSON, &b, &code, err, errlen)) {
+        /* gros subreddit : l'archive dépasse son délai (HTTP 422 « Timeout ») sans fenêtre de dates */
+        if (code == 422 || code >= 500) return archive_multi(sub, after, feed, err, errlen);
+        return -1;
+    }
     JVal *j = json_parse(b.data);
     buf_free(&b);
     JVal *data = json_get(j, "data");
@@ -851,8 +1044,8 @@ int reddit_fetch_feed(const char *sub, const char *sort, const char *after, doub
     bool archive_cursor = !strncmp(aft, "as:", 3);
 
     if (s_mode != MODE_ARCHIVE && !archive_cursor) {
-        for (int k = 0; k < s_ninstances; k++) {
-            int i = (s_good_instance + k) % s_ninstances;
+        for (int k = 0; k < tries_count(); k++) {
+            int i = try_index(k);
             if (redlib_feed_from(s_instances[i], sub, sort, aft, feed, last_err, sizeof(last_err)) == 0) {
                 s_good_instance = i;
                 return 0;
@@ -877,8 +1070,8 @@ int reddit_fetch_comments(const Post *post, Comments *out, char *err, size_t err
 
     char last_err[160] = "";
     if (s_mode != MODE_ARCHIVE) {
-        for (int k = 0; k < s_ninstances; k++) {
-            int i = (s_good_instance + k) % s_ninstances;
+        for (int k = 0; k < tries_count(); k++) {
+            int i = try_index(k);
             comments_clear(out);
             if (redlib_comments_from(s_instances[i], post, out, last_err, sizeof(last_err)) == 0) {
                 s_good_instance = i;
@@ -1010,8 +1203,8 @@ int reddit_search_subs(const char *query, SubList *out, char *err, size_t errlen
 
     char last_err[160] = "";
     if (s_mode != MODE_ARCHIVE) {
-        for (int k = 0; k < s_ninstances; k++) {
-            int i = (s_good_instance + k) % s_ninstances;
+        for (int k = 0; k < tries_count(); k++) {
+            int i = try_index(k);
             sublist_clear(out);
             if (redlib_search_from(s_instances[i], query, out, last_err, sizeof(last_err)) == 0) {
                 s_good_instance = i;
@@ -1025,4 +1218,64 @@ int reddit_search_subs(const char *query, SubList *out, char *err, size_t errlen
         return -1;
     }
     return archive_search(query, out, err, errlen);
+}
+
+/* ------------------------------------------------------------------ */
+/* Statut des instances Redlib                                        */
+
+int reddit_check_instances(InstStatus *out, int max, volatile int *progress)
+{
+    int n = s_ninstances < max ? s_ninstances : max;
+    for (int i = 0; i < n; i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        snprintf(out[i].host, sizeof(out[i].host), "%.63s", s_instances[i]);
+    }
+    if (progress) *progress = 0;
+
+    int best = -1;
+    for (int i = 0; i < n; i++) {
+        InstStatus *st = &out[i];
+        char url[160], err[160] = "";
+        snprintf(url, sizeof(url), "https://%s/r/popular/hot", st->host);
+        Buf b = {0};
+        long code = 0;
+        u64 t0 = osGetTime();
+        int r = http_request(s_conn, url, NULL, NULL, NULL, ACCEPT_HTML, 0, &b, &code, err, sizeof(err));
+        st->ms = (int)(osGetTime() - t0);
+        if (r != 0) {
+            st->state = INST_DOWN;
+            snprintf(st->err, sizeof(st->err), "%s", err);
+            buf_free(&b);
+            if (!strcmp(err, "Annulé")) break; /* requête annulée (B) : on arrête là */
+        } else if (code != 200 || !b.data) {
+            st->state = (code == 403 || code == 429) ? INST_BLOCKED : INST_DOWN;
+            if (code == 429) snprintf(st->err, sizeof(st->err), TR("HTTP 429 : trop de requêtes", "HTTP 429: too many requests"));
+            else if (code == 403) snprintf(st->err, sizeof(st->err), TR("HTTP 403 : accès refusé", "HTTP 403: access denied"));
+            else if (code >= 300 && code < 400) snprintf(st->err, sizeof(st->err), TR("HTTP %ld : redirection (instance déplacée ?)", "HTTP %ld: redirect (instance moved?)"), code);
+            else snprintf(st->err, sizeof(st->err), "HTTP %ld", code);
+            buf_free(&b);
+        } else {
+            const char *html = b.data, *end = b.data + b.len;
+            const char *posts = html_find(html, end, "<div id=\"posts\"");
+            if (posts) {
+                for (const char *p = next_post_div(posts, end); p; p = next_post_div(p + 16, end)) st->posts++;
+            }
+            if (st->posts > 0) {
+                st->state = INST_OK;
+                if (best < 0 || st->ms < out[best].ms) best = i;
+            } else {
+                st->state = INST_BLOCKED; /* page reçue mais sans posts : anti-robot, instance fermée... */
+                redlib_page_error(html, st->err, sizeof(st->err));
+                if (!st->err[0]) snprintf(st->err, sizeof(st->err), "%s", TR("page sans posts", "page without posts"));
+            }
+            buf_free(&b);
+        }
+        if (progress) {
+            __sync_synchronize();
+            *progress = i + 1;
+        }
+    }
+    /* mode automatique : on commence désormais par l'instance la plus rapide */
+    if (best >= 0 && s_pref < 0) s_good_instance = best;
+    return n;
 }

@@ -8,9 +8,12 @@ A read-only Reddit client for the Nintendo 3DS (homebrew, CFW required), distrib
 - **Images**: thumbnails in the feed, preview on the bottom screen, images in posts, and a
   **zoomable full-screen viewer** (JPEG and PNG; previews for videos and galleries)
 - **Subreddit search** with icons, member counts, and descriptions
+- **Local subscriptions** (no account) and **themed suggestions** at the top of the home feed
 - **Reddit videos with sound** (`v.redd.it`), up to 360p, streamed or played after full preloading,
-  with pause, volume control, and loading progress
+  with pause, volume control, and loading progress, **seeking** (rewind / fast-forward, touch progress bar)
+  and **zoom** like the image viewer
 - **One-tap translation** of posts and comments (displayed progressively)
+- **Estimated downvotes** and upvote ratio (read from the post page on Redlib, or from the archive)
 - Color-coded threaded comments, with inertial touch scrolling
 - Sorting: Popular / New / Top (24 h) / Rising, with infinite scrolling
 - Background loading (the interface never freezes; B cancels the operation)
@@ -25,12 +28,17 @@ A read-only Reddit client for the Nintendo 3DS (homebrew, CFW required), distrib
 | Feed | Y / Subs button | Open the Subs tab: search bar + touch keyboard |
 | Feed | L / R | Change sorting |
 | Feed | X | Refresh |
+| Home | D-pad up on the first post | Select the suggestions row (left / right to choose, A to open, or tap on the bottom screen) |
+| Subreddit | « + Join » button | Subscribe / unsubscribe locally (stored in `config.ini`) |
 | Post | D-pad / swipe | Browse comments |
 | Post | Circle Pad, L / R | Scroll through the post text |
 | Post | A | Open image full-screen |
 | Post | A (video post) | Play the video with sound |
 | Video | A / tap, B | Pause / play, exit |
-| Video | D-pad up/down, L / R | Adjust volume |
+| Video | D-pad left / right, << 5 s / 5 s >> buttons | Go back / forward 5 seconds |
+| Video | Tap or drag the progress bar | Jump to that position |
+| Video | D-pad up/down, Vol − / Vol + buttons | Adjust volume |
+| Video | L / R, Zoom − / Zoom + buttons, Circle Pad | Zoom, move around the zoomed video |
 | Post | Y / Translate button | Translate the post and comments (press again to show the original) |
 | Image | L / R, + / − buttons | Zoom |
 | Image | Circle Pad, D-pad, swipe | Move around the image |
@@ -48,7 +56,7 @@ On Linux/WSL, run `./build.sh`.
 
 The script does not install anything system-wide (no `sudo`, no Docker): it downloads
 devkitARM from the official `devkitpro/devkitarm` Docker image and `makerom` from
-GitHub into `~/.cache/reddit3ds`, then generates `Reddit3DS.cia` and `Reddit3DS.3dsx` here.
+GitHub into `~/.cache/reddit3ds`, then generates `Red3DS.cia` and `Red3DS.3dsx` here (old copies are deleted first).
 The first run takes a few minutes; subsequent runs take only a few seconds.
 
 The first run also builds a minimal version of **FFmpeg** (H.264, AAC, MP4;
@@ -61,7 +69,7 @@ If devkitPro is already installed, run `make cia` (`makerom` must be in your `PA
 
 ## Installation
 
-1. Copy `Reddit3DS.cia` to your SD card.
+1. Copy `Red3DS.cia` to your SD card.
 2. Install it using **FBI** (or Universal-Updater / GodMode9).
 3. Launch it from the HOME Menu (with Wi-Fi enabled).
 
@@ -76,7 +84,13 @@ The app therefore uses:
    Popular / New / Top / Rising sorting options. Several instances are tried in sequence,
    and the last working one is reused.
 2. **Arctic Shift** (JSON archive, as a last resort): very reliable, but only includes the
-   most recent posts, has scores frozen at the time of archiving, and does not support `r/popular`.
+   most recent posts and has scores frozen at the time of archiving. It has no `r/popular` and serves one
+   subreddit per request, so the home feed is rebuilt from one request per subreddit, merged by date
+   (`r/popular` is replaced by large subreddits). This takes a few seconds per page.
+
+Redlib servers are run by volunteers: many are offline, or protected by anti-bot pages
+(Anubis, Cloudflare, go-away, Gandalf) that require a web browser and cannot be passed by the 3DS.
+The default list only contains servers that worked when tested; use **Settings > Server status** to check them.
 
 The active data source is displayed at the bottom of the lower screen.
 
@@ -86,6 +100,8 @@ The active data source is displayed at the bottom of the lower screen.
 |---|---|
 | Interface language | French, English (default: console language) |
 | Content language | All (`r/popular`), French, English, Spanish, German, Italian, Portuguese: the home feed groups major subreddits in the selected language |
+| Home feed | Suggestions, Subscriptions (local, no account), or both mixed |
+| Suggestions | Theme of the suggestions shown at the top of the home feed and in the Subs tab: by language, video games, Nintendo / 3DS, tech, science, news, humour, or off |
 | Default sorting | Popular, New, Top 24 h, Rising |
 | On startup | Home feed or a selected subreddit |
 | NSFW content | Hide (removed from the feed), Blur (image hidden until A is pressed), Show |
@@ -95,11 +111,13 @@ The active data source is displayed at the bottom of the lower screen.
 | Maximum video quality | Auto (360p on New 3DS, 270p on Old 3DS), 220p, 270p, 360p |
 | Video playback | Direct (streaming, starts quickly) or Preload (the video and audio are fully downloaded to the SD card first, then played without interruptions) |
 | Data source | Auto, Redlib, Archive |
+| Redlib server | Automatic (servers tried in order, last working one first) or one specific server |
+| Server status | Tests every Redlib server (response time, blocked / offline) and lets you pick one |
 | Clear image cache | |
 
 Reddit does not translate posts: **Content language** selects subreddits written in that language.
 Settings are saved to `sdmc:/3ds/reddit3ds/config.ini`. You can also edit the Redlib instance
-list (`redlib=`) there and add a `client_id`.
+list (`redlib=`) there (`redlib_server=` holds the chosen server) and add a `client_id`.
 
 ## Architecture
 
@@ -109,6 +127,8 @@ source/
   ui.c/h    citro2d rendering: text, cards, badges, touch buttons, animations
   image.c/h background JPEG/PNG downloading and decoding, texture cache
   job.c/h   Reddit requests in a worker thread (cancellable)
+  video.c/h v.redd.it player (FFmpeg + NDSP), seeking
+  translate.c/h translation (Google, MyMemory)
   settings.c/h settings (`config.ini`) and FR/EN translations
   reddit.c/h data sources (Redlib, Arctic Shift, optional OAuth), Post/Comment model
   html.c/h  text extraction from Redlib HTML
@@ -123,7 +143,10 @@ app.rsf     title description for makerom
 
 - Videos: sound requires `sdmc:/3ds/dspfirm.cdc` (create it once using the DSP1 tool).
   On Old 3DS, decoding is done in software: 270p by default, with the deblocking filter disabled.
-  No seeking; YouTube and other external videos cannot be played.
+  YouTube and other external videos cannot be played. When streaming (Direct mode), seeking far
+  re-downloads from the new position (HTTP Range requests).
+- Downvotes are estimated from the score and the upvote ratio (Reddit no longer publishes them); on
+  Redlib the ratio is only known once the post is opened.
 - Read-only (no voting, commenting, or account sign-in).
 - Markdown is displayed as raw text.
 - Replies shown as “+ N more not loaded” cannot be expanded (up to 400 comments per post).

@@ -24,6 +24,8 @@ void net_exit(void);
 typedef struct NetConn NetConn;
 NetConn *net_conn_new(volatile bool *cancel); /* cancel : si *cancel devient vrai, la requête s'interrompt */
 void     net_conn_free(NetConn *c);
+/* Change le drapeau d'annulation d'une connexion existante */
+void     net_conn_set_cancel(NetConn *c, volatile bool *cancel);
 /* Taille totale (octets) du téléchargement en cours, 0 si inconnue (en-tête Content-Length reçu) */
 long long net_conn_total(const NetConn *c);
 

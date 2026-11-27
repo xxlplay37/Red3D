@@ -39,6 +39,8 @@ static const char *VM_KEYS[]   = { "direct", "preload" };
 static const char *IQ_KEYS[]   = { "normal", "high", "max" };
 static const char *CB_KEYS[]   = { "4", "8", "12", "20", "all" };
 static const int   CB_VALUES[] = { 4, 8, 12, 20, 0 };
+static const char *HOME_KEYS[] = { "suggestions", "subs", "both" };
+static const char *SUG_KEYS[]  = { "lang", "gaming", "nintendo", "tech", "science", "news", "fun", "off" };
 
 static char *trim(char *s)
 {
@@ -98,7 +100,7 @@ void settings_load(void)
         return;
     }
     bool has_start = false;
-    char line[1200];
+    char line[1600];
     while (fgets(line, sizeof(line), f)) {
         char *l = trim(line);
         if (!*l || *l == '#' || *l == ';') continue;
@@ -116,7 +118,11 @@ void settings_load(void)
         else if (!strcmp(k, "comments_per_page")) g_cfg.com_batch = find_key(v, CB_KEYS, COM_BATCHES, 0);
         else if (!strcmp(k, "translate_to")) g_cfg.tr_lang = find_key(v, TL_KEYS, TL_LANGS, g_cfg.tr_lang);
         else if (!strcmp(k, "recent")) snprintf(g_cfg.recent, sizeof(g_cfg.recent), "%s", v);
+        else if (!strcmp(k, "subs")) snprintf(g_cfg.subs, sizeof(g_cfg.subs), "%s", v);
+        else if (!strcmp(k, "home_feed")) g_cfg.home_mode = find_key(v, HOME_KEYS, HOME_MODES, HOME_SUGGEST);
+        else if (!strcmp(k, "suggestions")) g_cfg.sug_theme = find_key(v, SUG_KEYS, SUG_THEMES, SUG_LANG);
         else if (!strcmp(k, "redlib") && *v) snprintf(g_cfg.redlib, sizeof(g_cfg.redlib), "%s", v);
+        else if (!strcmp(k, "redlib_server")) snprintf(g_cfg.redlib_server, sizeof(g_cfg.redlib_server), "%s", v);
         else if (!strcmp(k, "source")) g_cfg.source = find_key(v, SRC_KEYS, SRC_MODES, SRC_AUTO);
         else if (!strcmp(k, "ui_lang")) g_cfg.ui_lang = find_key(v, LANG_KEYS, UI_LANGS, g_cfg.ui_lang);
         else if (!strcmp(k, "content_lang")) g_cfg.content_lang = find_key(v, CL_KEYS, CONTENT_LANGS, g_cfg.content_lang);
@@ -134,6 +140,11 @@ void settings_load(void)
         }
     }
     fclose(f);
+    /* ancienne liste par défaut (6 serveurs sur 8 morts ou bloqués) : remplacée par la nouvelle */
+    if (!strcmp(g_cfg.redlib, REDDIT_OLD_DEFAULT_INSTANCES)) {
+        snprintf(g_cfg.redlib, sizeof(g_cfg.redlib), "%s", REDDIT_DEFAULT_INSTANCES);
+        settings_save();
+    }
 }
 
 bool settings_save(void)
@@ -149,7 +160,13 @@ bool settings_save(void)
             "ui_lang=%s\n"
             "# Langue du fil d'accueil : all, fr, en, es, de, it, pt\n"
             "content_lang=%s\n"
-            "# Subreddit au démarrage (vide = fil d'accueil)\n"
+            "# Fil d'accueil : suggestions, subs (abonnements), both (les deux)\n"
+            "home_feed=%s\n"
+            "# Suggestions (accueil et onglet Subs) : lang, gaming, nintendo, tech, science, news, fun, off\n"
+            "suggestions=%s\n"
+            "# Abonnements locaux (subreddits séparés par des virgules)\n"
+            "subs=%s\n"
+"# Subreddit au démarrage (vide = fil d'accueil)\n"
             "start_sub=%s\n"
             "# Tri par défaut : hot, new, top, rising\n"
             "sort=%s\n"
@@ -174,26 +191,25 @@ bool settings_save(void)
             "source=%s\n"
             "# Instances Redlib essayées dans l'ordre (https://github.com/redlib-org/redlib-instances)\n"
             "redlib=%s\n"
+            "# Serveur Redlib imposé (vide = automatique : la liste ci-dessus, dans l'ordre)\n"
+            "redlib_server=%s\n"
             "# Subreddits récents (onglet Subs)\n"
             "recent=%s\n"
             "# Facultatif : client_id d'une app Reddit \"installed app\" (API officielle)\n"
             "client_id=%s\n",
-            LANG_KEYS[g_cfg.ui_lang], CL_KEYS[g_cfg.content_lang], g_cfg.start_sub,
+            LANG_KEYS[g_cfg.ui_lang], CL_KEYS[g_cfg.content_lang],
+            HOME_KEYS[g_cfg.home_mode], SUG_KEYS[g_cfg.sug_theme], g_cfg.subs, g_cfg.start_sub,
             SORT_KEYS[g_cfg.default_sort], NSFW_KEYS[g_cfg.nsfw], IMG_KEYS[g_cfg.images],
-            TEXT_KEYS[g_cfg.text_size], TL_KEYS[g_cfg.tr_lang], VQ_KEYS[g_cfg.video_q], VM_KEYS[g_cfg.video_mode], IQ_KEYS[g_cfg.img_quality], CB_KEYS[g_cfg.com_batch], SRC_KEYS[g_cfg.source], g_cfg.redlib, g_cfg.recent, g_cfg.client_id);
+            TEXT_KEYS[g_cfg.text_size], TL_KEYS[g_cfg.tr_lang], VQ_KEYS[g_cfg.video_q], VM_KEYS[g_cfg.video_mode], IQ_KEYS[g_cfg.img_quality], CB_KEYS[g_cfg.com_batch], SRC_KEYS[g_cfg.source], g_cfg.redlib, g_cfg.redlib_server, g_cfg.recent, g_cfg.client_id);
     fclose(f);
     return true;
 }
 
 void settings_apply_source(void)
 {
-    reddit_configure(g_cfg.client_id, g_cfg.redlib, g_cfg.source);
+    reddit_configure(g_cfg.client_id, g_cfg.redlib, g_cfg.source, g_cfg.redlib_server);
 }
 
-const char *settings_home_feed(void)
-{
-    return CONTENT[g_cfg.content_lang].feed;
-}
 
 const char *settings_content_lang_name(int cl)
 {
@@ -263,4 +279,146 @@ int settings_video_maxp(void)
         return n3ds ? 360 : 270;
     }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Suggestions, abonnements et fil d'accueil                          */
+
+/* Suggestions « langue du contenu » */
+static const char *SUG_LANG_LIST[CONTENT_LANGS][NSUGGEST] = {
+    [CL_ALL] = { "AskReddit", "worldnews", "gaming", "pics", "movies", "todayilearned", "3DS", "Nintendo" },
+    [CL_FR]  = { "france", "AskFrance", "jeuxvideo", "Quebec", "belgium", "programmation", "3DS", "Nintendo" },
+    [CL_EN]  = { "AskReddit", "worldnews", "gaming", "todayilearned", "technology", "movies", "3DS", "Nintendo" },
+    [CL_ES]  = { "es", "spain", "mexico", "argentina", "chile", "colombia", "3DS", "Nintendo" },
+    [CL_DE]  = { "de", "germany", "Austria", "Switzerland", "Finanzen", "FragReddit", "3DS", "Nintendo" },
+    [CL_IT]  = { "italy", "Italia", "italygames", "ItaliaPersonalFinance", "ItalyInformatica", "3DS", "Nintendo", "gaming" },
+    [CL_PT]  = { "brasil", "portugal", "desabafos", "futebol", "investimentos", "3DS", "Nintendo", "gaming" },
+};
+
+/* Suggestions par thème (index SUG_GAMING..SUG_FUN) */
+static const char *SUG_THEME_LIST[SUG_OFF][NSUGGEST] = {
+    [SUG_GAMING]   = { "gaming", "Games", "pcgaming", "NintendoSwitch", "PS5", "XboxSeriesX", "Steam", "retrogaming" },
+    [SUG_NINTENDO] = { "Nintendo", "3DS", "NintendoSwitch", "pokemon", "zelda", "Mario", "3dshacks", "SmashBrosUltimate" },
+    [SUG_TECH]     = { "technology", "programming", "linux", "Android", "apple", "pcmasterrace", "hardware", "homelab" },
+    [SUG_SCIENCE]  = { "science", "space", "askscience", "Physics", "Futurology", "dataisbeautiful", "biology", "chemistry" },
+    [SUG_NEWS]     = { "worldnews", "news", "europe", "UpliftingNews", "geopolitics", "economics", "environment", "technews" },
+    [SUG_FUN]      = { "funny", "memes", "ProgrammerHumor", "me_irl", "wholesomememes", "Jokes", "comics", "mildlyinteresting" },
+};
+
+const char *settings_sug_name(int theme)
+{
+    switch (theme) {
+    case SUG_LANG:     return TR("Selon la langue", "By language");
+    case SUG_GAMING:   return TR("Jeux vidéo", "Video games");
+    case SUG_NINTENDO: return "Nintendo / 3DS";
+    case SUG_TECH:     return TR("Tech / info", "Tech");
+    case SUG_SCIENCE:  return "Science";
+    case SUG_NEWS:     return TR("Actualités", "News");
+    case SUG_FUN:      return TR("Humour", "Humour");
+    default:           return TR("Désactivées", "Off");
+    }
+}
+
+const char *settings_home_mode_name(int m)
+{
+    switch (m) {
+    case HOME_SUBS: return TR("Abonnements", "Subscriptions");
+    case HOME_BOTH: return TR("Abonnements + suggestions", "Subscriptions + suggestions");
+    default:        return TR("Suggestions", "Suggestions");
+    }
+}
+
+int settings_suggestions(const char *out[], int max)
+{
+    int t = g_cfg.sug_theme;
+    if (t < 0 || t >= SUG_OFF) return 0;
+    const char *const *list = t == SUG_LANG ? SUG_LANG_LIST[g_cfg.content_lang] : SUG_THEME_LIST[t];
+    int n = 0;
+    for (int i = 0; i < NSUGGEST && n < max; i++)
+        if (list[i]) out[n++] = list[i];
+    return n;
+}
+
+int settings_subs(char out[][64], int max)
+{
+    int n = 0;
+    char tmp[sizeof(g_cfg.subs)];
+    snprintf(tmp, sizeof(tmp), "%s", g_cfg.subs);
+    for (char *t = strtok(tmp, ","); t && n < max; t = strtok(NULL, ",")) {
+        t = trim(t);
+        if (*t) snprintf(out[n++], 64, "%s", t);
+    }
+    return n;
+}
+
+bool settings_is_sub(const char *sub)
+{
+    if (!sub || !*sub) return false;
+    char list[MAX_SUBS][64];
+    int n = settings_subs(list, MAX_SUBS);
+    for (int i = 0; i < n; i++)
+        if (!strcasecmp(list[i], sub)) return true;
+    return false;
+}
+
+bool settings_toggle_sub(const char *sub)
+{
+    if (!sub || !*sub || strchr(sub, '+')) return false;
+    char list[MAX_SUBS][64];
+    int n = settings_subs(list, MAX_SUBS);
+    bool found = false;
+    char out[sizeof(g_cfg.subs)] = "";
+    for (int i = 0; i < n; i++) {
+        if (!strcasecmp(list[i], sub)) { found = true; continue; } /* désabonnement */
+        size_t l = strlen(out);
+        snprintf(out + l, sizeof(out) - l, "%s%.63s", l ? "," : "", list[i]);
+    }
+    if (!found) {
+        if (n >= MAX_SUBS || strlen(out) + strlen(sub) + 2 > sizeof(out)) return false; /* liste pleine */
+        size_t l = strlen(out);
+        snprintf(out + l, sizeof(out) - l, "%s%s", l ? "," : "", sub);
+    }
+    snprintf(g_cfg.subs, sizeof(g_cfg.subs), "%s", out);
+    return !found;
+}
+
+/* Ajoute "a+b+c" à buf tant que ça tient (la requête est limitée à ~250 caractères) */
+static void feed_add(char *buf, size_t n, const char *sub)
+{
+    size_t l = strlen(buf), sl = strlen(sub);
+    if (!sl || l + sl + 2 > n) return;
+    /* pas de doublon */
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s", buf);
+    char *sv = NULL;
+    for (char *t = strtok_r(tmp, "+", &sv); t; t = strtok_r(NULL, "+", &sv))
+        if (!strcasecmp(t, sub)) return;
+    snprintf(buf + l, n - l, "%s%s", l ? "+" : "", sub);
+}
+
+const char *settings_home_feed(void)
+{
+    static char buf[250];
+    buf[0] = '\0';
+    if (g_cfg.home_mode == HOME_SUBS || g_cfg.home_mode == HOME_BOTH) {
+        char list[MAX_SUBS][64];
+        int n = settings_subs(list, MAX_SUBS);
+        for (int i = 0; i < n; i++) feed_add(buf, sizeof(buf), list[i]);
+        if (g_cfg.home_mode == HOME_SUBS && buf[0]) return buf;
+    }
+    /* suggestions : thème choisi, ou les grands subreddits de la langue du contenu */
+    if (g_cfg.sug_theme > SUG_LANG && g_cfg.sug_theme < SUG_OFF) {
+        const char *s[NSUGGEST];
+        int n = settings_suggestions(s, NSUGGEST);
+        for (int i = 0; i < n; i++) feed_add(buf, sizeof(buf), s[i]);
+        return buf;
+    }
+    if (!buf[0]) return CONTENT[g_cfg.content_lang].feed;
+    /* abonnements + fil de la langue */
+    char lang[200];
+    snprintf(lang, sizeof(lang), "%s", CONTENT[g_cfg.content_lang].feed);
+    if (!strcmp(lang, "popular")) return buf; /* r/popular ne se combine pas */
+    char *sv = NULL;
+    for (char *t = strtok_r(lang, "+", &sv); t; t = strtok_r(NULL, "+", &sv)) feed_add(buf, sizeof(buf), t);
+    return buf;
 }

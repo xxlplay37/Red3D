@@ -1,5 +1,5 @@
 @echo off
-rem Double-clique ce fichier pour compiler Reddit3DS.cia (via WSL, rien a installer).
+rem Double-clique ce fichier pour compiler Red3DS.cia (via WSL, rien a installer).
 where wsl >NUL 2>NUL
 if errorlevel 1 (
     echo WSL n'est pas installe. Ouvre PowerShell en administrateur et tape : wsl --install
@@ -12,6 +12,6 @@ if errorlevel 1 (
     echo ECHEC de la compilation.
 ) else (
     echo.
-    echo OK : Reddit3DS.cia est dans ce dossier.
+    echo OK : Red3DS.cia est dans ce dossier (les anciens .cia ont ete supprimes).
 )
 pause
